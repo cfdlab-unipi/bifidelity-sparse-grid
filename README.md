@@ -142,7 +142,7 @@ Defines the physical problem.
 #### sparse_grid_settings
 Controls the sparse grid complexity.
 - **`base_level`**: The level (w) of the initial coarse grid (Phase 1). A higher number means more initial points.
-- **`target_level`**: The level of the denser grid from which refinement candidates are drawn (Phase 2).
+- **`target_level`**: The level of the denser grid from which refinement candidates are drawn (Phase 2). Note that actually the target level should be equal to the base level + 1.
 
 #### refinement_settings
 Controls the adaptive selection logic.
@@ -167,7 +167,7 @@ Controls the generation of 2D visualizations.
 The script generates and reads tab-separated value (.dat) files. You can open these with any spreadsheet program or text editor.
 
 ### Phase 1 & 2 Files (..._to_fill.dat)
-These files contain the coordinates where you need to provide results. The input dimension columns are pre-filled, and the output quantity columns are empty (NaN).
+These files contain the coordinates where you need to provide results. The input dimension columns are pre-filled, and the output quantity columns are empty (#).
 
 **Example: analisi_v1_phase1_to_fill.dat**
 ```tsv
@@ -176,6 +176,7 @@ W	L	D	H	V_FB	T_B
 0.4	0.0	0.3	0.3	  #	     #
 0.8	4.0	1.7	0.9	  #	     #
 ...	...	...	...	...	...
+```
 
 You need to replace # with your calculated values.
 
@@ -184,10 +185,11 @@ This file, which you must create, provides a "ground truth" to test the models' 
 
 **Example: validation-data.dat**
 ```tsv
-W	L	D	H	V_FB	T_B
+W	L	D	H	        V_FB	T_B
 0.55	1.5	1.1	0.75	1.23	745.6
 0.71	3.2	0.8	0.40	3.98	880.1
 ...	...	...	...	...	...
+```
 
 ## Outputs
 
