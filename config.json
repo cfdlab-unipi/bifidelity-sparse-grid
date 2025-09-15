@@ -1,0 +1,41 @@
+{
+    "project_name": "analisi_v1",
+    "output_dir": "output",
+    "data_dir": "hifi-data",
+
+    "problem_definition": {
+        "dim_names": ["W", "L", "D", "H"],
+        "domains": [
+            [0.4, 0.8],
+            [0.0, 4.0],
+            [0.3, 1.7],
+            [0.3, 0.9]
+        ],
+        "output_quantities": ["V_FB", "T_B"]
+    },
+
+    "sparse_grid_settings": {
+        "base_level": 2,
+        "target_level": 3
+    },
+
+    "refinement_settings": {
+        "refinement_criterion": "V_FB",
+        "use_auto_budget": true,
+        "auto_budget_method": "threshold",
+        "auto_budget_threshold": 0.10,
+        "max_budget": 33
+    },
+    
+    "validation": {
+        "validation_data_file": "validation-data.dat" 
+    },
+
+    "plotting": {
+        "plot_resolution": 50,
+        "slices_2d": [
+            {"fixed": {"L": 0.0, "H": 0.6}, "varying": ["W", "D"]},
+            {"fixed": {"W": 0.6, "D": 1.0}, "varying": ["L", "H"]}
+        ]
+    }
+}
