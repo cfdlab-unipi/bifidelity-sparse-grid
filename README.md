@@ -127,7 +127,7 @@ The `config.json` file controls all aspects of the workflow. Below is an explana
         ]
     }
 }
-
+```
 project_name: A unique name for your analysis. Used for naming output files.
 output_dir: Directory where all plots and results will be saved.
 data_dir: Directory where the data files to be filled (..._to_fill.dat) are stored.
