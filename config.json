@@ -1,17 +1,22 @@
 {
-    "project_name": "analisi_v1",
+    "project_name": "analisi_informed_22_01_2026",
     "output_dir": "output",
     "data_dir": "hifi-data",
 
     "problem_definition": {
-        "dim_names": ["W", "L", "D", "H"],
+        "dim_names": ["y1", "y2", "y3"],
         "domains": [
-            [0.4, 0.8],
-            [0.0, 4.0],
-            [0.3, 1.7],
-            [0.3, 0.9]
+            [20, 140],
+            [0.03, 0.07],
+            [1, 6]
         ],
-        "output_quantities": ["V_FB", "T_B"]
+        "output_quantities": [{
+            "name": "kurt_mean",
+            "size": 1000,
+            "label": "p",
+            "pad": 4,
+            "plot_indices": [0, 10, 999]
+        }]
     },
 
     "sparse_grid_settings": {
@@ -20,11 +25,11 @@
     },
 
     "refinement_settings": {
-        "refinement_criterion": "V_FB",
+        "refinement_criterion": "kurt_mean",
         "use_auto_budget": true,
         "auto_budget_method": "threshold",
-        "auto_budget_threshold": 0.10,
-        "max_budget": 33
+        "auto_budget_threshold": 0.05,
+        "max_budget": 15
     },
     
     "validation": {
@@ -34,8 +39,8 @@
     "plotting": {
         "plot_resolution": 50,
         "slices_2d": [
-            {"fixed": {"L": 0.0, "H": 0.6}, "varying": ["W", "D"]},
-            {"fixed": {"W": 0.6, "D": 1.0}, "varying": ["L", "H"]}
+            {"fixed": {"y3": 1},
+             "varying": ["y1", "y2"]}
         ]
     }
 }
