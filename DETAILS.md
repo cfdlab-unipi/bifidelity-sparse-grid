@@ -1,7 +1,6 @@
 # Adaptive Sparse Grid Toolkit — Configuration Reference
 
 This document lists **all supported `config.json` fields** and explains what they do.
-For mathematical background (sparse‑grid interpolation and quadrature), see `theory.tex`.
 
 ---
 
@@ -218,4 +217,3 @@ Use `config.example.json` as a starting point. It includes:
 - Vector QoIs generate component columns according to `name`, `label`, and `pad`.
 - Phase templates are written as `*_phase1_to_fill.dat` and `*_phase2_to_fill.dat`.
 - You must copy each template to a file **without** the `_to_fill` suffix and fill the new file.
-
