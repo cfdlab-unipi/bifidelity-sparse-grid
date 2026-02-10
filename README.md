@@ -1,4 +1,4 @@
-# Adaptive Sparse Grid Toolkit
+# Surrogate-Informed Sparse Grid Toolkit
 
 This toolkit provides a complete, three‑phase workflow for building surrogate models with adaptive sparse grids. It is designed to reduce the number of expensive evaluations (e.g., simulations or experiments) by selecting the most informative points for refinement.
 
