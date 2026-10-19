@@ -188,7 +188,7 @@ for editable installation, test coverage, and distribution builds.
 
 M. Rosellini, F. Fruzza, A. Mariotti, M. V. Salvetti, and L. Tamellini.
 *A bifidelity sparse-grid surrogate model driven by a discrepancy indicator*.
-Manuscript, 2026.
+[arXiv:2511.20187](https://arxiv.org/abs/2511.20187).
 
 ## Contact
 
