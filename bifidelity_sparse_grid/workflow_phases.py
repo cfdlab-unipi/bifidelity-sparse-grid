@@ -14,22 +14,25 @@ Robust I/O features:
 """
 
 import os
+import json
+from .nodes import MAX_LEJA_NODES
 import io
 import re
 import numpy as np
 import pandas as pd
 
 # --- Import from your custom toolboxes ---
-from sparse_grid_toolbox import (
+from .sparse_grid_toolbox import (
     PdfSpec,
     create_sparse_grid_structure, reduce_sparse_grid_knots,
     evaluate_sparse_grid_interpolant, compute_discrepancy_indicator,
+    select_refinement_points, knots_cc_1d, knots_leja_line_1d, knots_leja_sym_line_1d,
     lev2knots_doubling, lev2knots_lin, lev2knots_2step,
     build_1d_knots_and_domains_from_pdfspecs,
     pdfspec_to_domain_and_rho,
     compute_sparse_grid_quadrature_weights
 )
-from plotting_tools import (
+from .plotting_tools import (
     plot_error_comparison_barchart, plot_combined_response_surfaces,
     plot_quadrature_points_slice, plot_discrepancy_by_point,
     plot_error_distribution, plot_vector_mean_std
@@ -39,8 +42,8 @@ from plotting_tools import (
 # Global settings
 # =============================================================================
 
-ROUND_DECIMALS = 6  # for deterministic point keys (set operations, dedupe)
-DEFAULT_TOL = 1e-6   # matching tolerance in physical space (snap-to-grid)
+ROUND_DECIMALS = 12  # for deterministic point keys (set operations, dedupe)
+DEFAULT_TOL = 1e-10   # matching tolerance in physical space (snap-to-grid)
 
 # =============================================================================
 # QoI helpers (scalar + vector support)
@@ -139,9 +142,9 @@ def _resolve_plot_columns(plot_cfg: dict, qoi_specs: list) -> list:
 
 def _refinement_values_from_qoi(df: pd.DataFrame, ref_name: str, qoi_specs: list) -> np.ndarray:
     """
-    Return a 1D array for the refinement criterion.
+    Return scalar values or component rows for the refinement criterion.
     - If ref_name is a scalar QoI column -> use it directly.
-    - If ref_name is a vector QoI name -> use the L2 norm across components.
+    - If ref_name is a vector QoI name -> retain component rows for interpolation.
     """
     if ref_name in df.columns:
         return df[ref_name].values.astype(float)
@@ -150,7 +153,7 @@ def _refinement_values_from_qoi(df: pd.DataFrame, ref_name: str, qoi_specs: list
     spec = name_to_spec.get(ref_name)
     if spec and spec["is_vector"]:
         vals = df[spec["columns"]].values.astype(float)
-        return np.linalg.norm(vals, axis=1)
+        return vals.T
 
     raise ValueError(
         f"Unknown refinement_criterion '{ref_name}'. "
@@ -204,7 +207,8 @@ def _parse_pdf_specs(p_def: dict) -> list:
             if sigma <= 0.0:
                 raise ValueError(f"Normal PDF requires sigma > 0 (dim '{dim_names[i]}').")
         elif pdf_type == "exponential":
-            lam = float(params.get("lambda", params.get("lam", 1.0)))
+            lam = float(params.get("lam", params.get("lambda", 1.0)))
+            params["lam"] = lam
             if lam <= 0.0:
                 raise ValueError(f"Exponential PDF requires lambda > 0 (dim '{dim_names[i]}').")
         elif pdf_type == "gamma":
@@ -213,8 +217,8 @@ def _parse_pdf_specs(p_def: dict) -> list:
             if alpha <= -1.0 or beta <= 0.0:
                 raise ValueError(f"Gamma PDF requires alpha > -1 and beta > 0 (dim '{dim_names[i]}').")
         elif pdf_type == "beta":
-            alpha = float(params.get("alpha", 0.0))
-            beta = float(params.get("beta", 0.0))
+            alpha = float(params.setdefault("alpha", 0.0))
+            beta = float(params.setdefault("beta", 0.0))
             if alpha <= -1.0 or beta <= -1.0:
                 raise ValueError(f"Beta PDF requires alpha > -1 and beta > -1 (dim '{dim_names[i]}').")
 
@@ -254,6 +258,44 @@ def _choose_level_to_knots(pdf_specs: list) -> callable:
     if any(bool(s.symmetric) for s in pdf_specs):
         return lev2knots_2step
     return lev2knots_lin
+
+def _grid_settings(p_def, sg_settings):
+    """Resolve the grid family once, consistently across the three phases."""
+    pdf_specs = _parse_pdf_specs(p_def)
+    knots_funcs, domains = build_1d_knots_and_domains_from_pdfspecs(pdf_specs)
+    level_to_knots = _choose_level_to_knots(pdf_specs)
+    grid_type = str(sg_settings.get("grid_type", "auto")).lower()
+
+    # The automatic setting preserves the original PDF-based rules. Explicit
+    # CC and tabulated Leja grids also work with weighted PDF integration.
+    if grid_type == "cc":
+        knots_funcs = [knots_cc_1d] * len(domains)
+        level_to_knots = lev2knots_doubling
+    elif grid_type == "leja_line":
+        knots_funcs = [knots_leja_line_1d] * len(domains)
+        level_to_knots = lev2knots_lin
+    elif grid_type == "leja_sym":
+        knots_funcs = [knots_leja_sym_line_1d] * len(domains)
+        level_to_knots = lev2knots_lin
+    elif grid_type != "auto":
+        raise ValueError("grid_type must be auto, CC, leja_line, or leja_sym.")
+
+    base_level = sg_settings["base_level"]
+    target_level = sg_settings["target_level"]
+    auxiliary_level = sg_settings.get("auxiliary_level", base_level - 1)
+    if int(base_level) != base_level or base_level < 1:
+        raise ValueError("base_level must be a positive integer.")
+    if int(target_level) != target_level or target_level <= base_level:
+        raise ValueError("target_level must be an integer above base_level.")
+    if int(auxiliary_level) != auxiliary_level or not 0 <= auxiliary_level < base_level:
+        raise ValueError("auxiliary_level must be an integer below base_level.")
+    if grid_type in ("leja_line", "leja_sym") and target_level + 1 > MAX_LEJA_NODES:
+        raise ValueError(f"The target grid needs more than the {MAX_LEJA_NODES} available Leja nodes.")
+    for a, b in domains:
+        if not np.isfinite(a) or not np.isfinite(b) or b <= a:
+            raise ValueError("Every domain must have finite bounds with max > min.")
+    return pdf_specs, knots_funcs, domains, level_to_knots
+
 
 def _build_pdf_functions(pdf_specs: list):
     """
@@ -608,11 +650,6 @@ def _build_informed_model_values(
         print(f"\n[INFO] '{quantity_name}': values inherited from BASE model "
               f"({missing.size} target nodes)")
 
-        for idx, p, v in zip(missing, pts.T, est):
-            coords = ", ".join(
-                f"{name}={val:.6g}" for name, val in zip(dim_names, p)
-            )
-            print(f"  - ({coords})  ->  {quantity_name} = {v:.6e}")
 
 
     return final_values
@@ -637,9 +674,7 @@ def run_phase_1(config):
 
     N = len(dim_names)
     w_start = sg_settings["base_level"]
-    pdf_specs = _parse_pdf_specs(p_def)
-    knots_funcs, domains = build_1d_knots_and_domains_from_pdfspecs(pdf_specs)
-    level_to_knots = _choose_level_to_knots(pdf_specs)
+    pdf_specs, knots_funcs, domains, level_to_knots = _grid_settings(p_def, sg_settings)
 
     S_start = create_sparse_grid_structure(N, w_start, level_to_knots, knots_funcs, domains)
     knots_base = reduce_sparse_grid_knots(S_start)
@@ -701,22 +736,22 @@ def run_phase_2(config):
     # Candidate points = target grid minus base grid
     N = len(dim_names)
     w_start, w_target = sg_settings["base_level"], sg_settings["target_level"]
-    pdf_specs = _parse_pdf_specs(p_def)
-    knots_funcs, domains = build_1d_knots_and_domains_from_pdfspecs(pdf_specs)
-    level_to_knots = _choose_level_to_knots(pdf_specs)
+    pdf_specs, knots_funcs, domains, level_to_knots = _grid_settings(p_def, sg_settings)
 
     S_target = create_sparse_grid_structure(N, w_target, level_to_knots, knots_funcs, domains)
     knots_target_total = reduce_sparse_grid_knots(S_target)
 
     base_set = _point_key_array(knots_base.T)
-    target_set = _point_key_array(knots_target_total.T)
 
-    candidate_tuples = sorted(list(target_set - base_set))
-    candidate_knots = np.array(candidate_tuples, dtype=float).T if candidate_tuples else np.empty((N, 0), dtype=float)
+    candidate_indices = []
+    for index, point in enumerate(knots_target_total.T):
+        if tuple(np.round(point, ROUND_DECIMALS)) not in base_set:
+            candidate_indices.append(index)
+    candidate_knots = knots_target_total[:, candidate_indices]
+    candidate_tuples = list(map(tuple, candidate_knots.T))
 
     if candidate_knots.shape[1] == 0:
-        print("No new candidate points found for refinement. The grid may already be at the target level.")
-        return
+        print("No new candidate points found for refinement.")
 
     # Compute discrepancy indicator
     print(f"Analyzing {candidate_knots.shape[1]} candidate points for refinement based on '{ref_criterion_name}'...")
@@ -728,41 +763,90 @@ def run_phase_2(config):
         knots_base,
         values_base_criterion,
         knots_func_1d=knots_funcs,
-        level_to_knots_func=level_to_knots
+        level_to_knots_func=level_to_knots,
+        indicator_type=ref_settings.get("indicator_type", "legacy"),
+        relative_epsilon=float(ref_settings.get("relative_epsilon", 1e-5)),
+        auxiliary_level=sg_settings.get("auxiliary_level", w_start - 1)
     )
 
-    # Determine budget
-    final_budget = 0
+    # Determine the requested number of new target evaluations.
+    candidate_count = len(indicators)
+    indicator_cutoff = None
+    max_budget = ref_settings.get("max_budget", candidate_count if ref_settings.get("use_auto_budget", False) else 0)
+    if not np.isfinite(max_budget) or int(max_budget) != max_budget or max_budget < 0:
+        raise ValueError("max_budget must be a non-negative integer.")
+    final_budget = min(int(max_budget), candidate_count)
     if ref_settings.get("use_auto_budget", False):
-        max_budget = int(ref_settings.get("max_budget", len(indicators)))
         method = ref_settings.get("auto_budget_method", "elbow")
         if method == "elbow":
-            print("  -> Calculating budget with 'Elbow' method...")
-            sorted_ind = np.sort(indicators)[::-1]
-            optimal = _find_elbow_point(sorted_ind)
-            final_budget = min(optimal, max_budget)
-            print(f"     - Elbow suggests: {optimal}. Final budget (cap {max_budget}): {final_budget}")
+            final_budget = min(_find_elbow_point(np.sort(indicators)[::-1]), final_budget)
         elif method == "threshold":
-            threshold_perc = float(ref_settings.get("auto_budget_threshold", 0.1))
-            print(f"  -> Calculating budget with 'Threshold' method ({threshold_perc*100:.0f}%)...")
-            if np.max(indicators) > 1e-12:
-                thr = np.max(indicators) * threshold_perc
-                num = int(np.sum(indicators >= thr))
-                final_budget = min(num, max_budget)
-                print(f"     - Threshold value: {thr:.4e}. Points above: {num}. Final budget: {final_budget}")
-            else:
-                print("     - Max indicator is zero. Budget set to 0.")
-                final_budget = 0
+            fraction = float(ref_settings.get("auto_budget_threshold", 0.1))
+            if not np.isfinite(fraction) or not 0 <= fraction <= 1:
+                raise ValueError("auto_budget_threshold must lie between zero and one.")
+            cutoff = fraction * np.max(indicators) if candidate_count else 0.0
+            above_count = int(np.sum(indicators >= cutoff))
+            if above_count <= final_budget:
+                indicator_cutoff = cutoff
+            # If a separate count cap is active, use the capped rank cutoff.
+            final_budget = min(above_count, final_budget)
         else:
-            raise ValueError(f"Unknown auto_budget_method='{method}'")
-    else:
-        final_budget = min(int(ref_settings.get("max_budget", 0)), len(indicators))
-        print(f"  -> Using fixed budget: {final_budget}")
+            raise ValueError("auto_budget_method must be elbow or threshold.")
+    elif "budget_percent" in ref_settings:
+        percent = float(ref_settings["budget_percent"])
+        if not np.isfinite(percent) or not 0 <= percent <= 100:
+            raise ValueError("budget_percent must lie between zero and 100.")
+        # Round the requested fraction down to a whole number of evaluations.
+        requested = int(np.floor(candidate_count * percent / 100.0))
+        final_budget = min(requested, int(ref_settings.get("max_budget", candidate_count)))
 
-    best_local_indices = np.argsort(indicators)[-final_budget:] if final_budget > 0 else np.array([], dtype=int)
+    nominal_budget = final_budget
+    best_local_indices = select_refinement_points(
+        indicators, nominal_budget,
+        include_ties=ref_settings.get("include_ties", True),
+        tie_tolerance=float(ref_settings.get("tie_tolerance", 1e-3)),
+        indicator_cutoff=indicator_cutoff,
+    )
+    final_budget = len(best_local_indices)
+    print(f"Nominal budget: {nominal_budget}; actual selected points: {final_budget}.")
     selected_knots_arr = candidate_knots[:, best_local_indices] if best_local_indices.size else np.empty((N, 0), dtype=float)
 
     print(f"\nSelected {selected_knots_arr.shape[1]} new points for refinement.")
+
+    # Save both the candidate ranking and actual selection. These files also
+    # let Phase 3 check that every required evaluation has been supplied.
+    os.makedirs(output_dir, exist_ok=True)
+    selected_mask = np.zeros(candidate_count, dtype=bool)
+    selected_mask[best_local_indices] = True
+    diagnostics = pd.DataFrame(candidate_knots.T, columns=dim_names)
+    diagnostics["indicator"] = indicators
+    diagnostics["selected"] = selected_mask
+    diagnostics = diagnostics.sort_values("indicator", ascending=False, kind="stable")
+    diagnostics.to_csv(os.path.join(output_dir, f"{proj_name}_selection.csv"), index=False)
+    selection_cutoff = 0.0
+    if nominal_budget > 0:
+        if indicator_cutoff is not None:
+            selection_cutoff = float(indicator_cutoff)
+        else:
+            selection_cutoff = float(np.sort(indicators)[-nominal_budget])
+    summary = {
+        "grid_type": sg_settings.get("grid_type", "auto"),
+        "indicator_type": ref_settings.get("indicator_type", "legacy"),
+        "relative_epsilon": float(ref_settings.get("relative_epsilon", 1e-5)),
+        "include_ties": bool(ref_settings.get("include_ties", True)),
+        "tie_tolerance": float(ref_settings.get("tie_tolerance", 1e-3)),
+        "base_level": w_start,
+        "auxiliary_level": sg_settings.get("auxiliary_level", w_start - 1),
+        "target_level": w_target,
+        "baseline_count": len(df_base),
+        "candidate_count": candidate_count,
+        "nominal_budget": nominal_budget,
+        "selection_cutoff": selection_cutoff,
+        "selected_count": final_budget,
+        "total_evaluations": len(df_base) + final_budget,
+    }
+    with open(os.path.join(output_dir, f"{proj_name}_selection.json"), "w") as file:
+        json.dump(summary, file, indent=2)
 
     # Discrepancy plot
     print("\nGenerating discrepancy plot to visualize the selection...")
@@ -780,11 +864,8 @@ def run_phase_2(config):
     if qoi_columns:
         df_selected = pd.concat([df_selected, pd.DataFrame(np.nan, index=df_selected.index, columns=qoi_columns)], axis=1)
 
-    selected_set = _point_key_array(selected_knots_arr.T) if selected_knots_arr.size else set()
-
     # OPTIONAL points: everything in target that is not in base and not in selected
-    remaining_tuples = sorted(list(target_set - base_set - selected_set))
-    remaining_knots = np.array(remaining_tuples, dtype=float)
+    remaining_knots = candidate_knots[:, ~selected_mask].T
     df_remaining = pd.DataFrame(remaining_knots, columns=dim_names) if remaining_knots.size else pd.DataFrame(columns=dim_names)
     if qoi_columns:
         df_remaining = pd.concat([df_remaining, pd.DataFrame(np.nan, index=df_remaining.index, columns=qoi_columns)], axis=1)
@@ -853,6 +934,14 @@ def run_phase_3(config):
     if len(df_ref_raw) > len(df_ref):
         print(f"[INFO] Ignored {len(df_ref_raw)-len(df_ref)} Phase-2 rows with missing QoIs (optional/unfilled).")
 
+    selection_path = os.path.join(output_dir, f"{proj_name}_selection.csv")
+    if os.path.exists(selection_path):
+        selection = pd.read_csv(selection_path)
+        required_points = _point_key_array(selection.loc[selection["selected"], dim_names].values)
+        filled_points = _point_key_array(df_ref[dim_names].values)
+        if required_points - filled_points:
+            raise ValueError("Phase 3: some automatically selected refinement points are missing or unfilled.")
+
     # Merge data; baseline wins on duplicates
     df_all = pd.concat([df_base, df_ref], ignore_index=True)
     df_all = _deduplicate_by_point(df_all, dim_names, keep="first")
@@ -862,9 +951,7 @@ def run_phase_3(config):
     # Grid structures
     N = len(dim_names)
     w_start, w_target = sg_settings["base_level"], sg_settings["target_level"]
-    pdf_specs = _parse_pdf_specs(p_def)
-    knots_funcs, domains = build_1d_knots_and_domains_from_pdfspecs(pdf_specs)
-    level_to_knots = _choose_level_to_knots(pdf_specs)
+    pdf_specs, knots_funcs, domains, level_to_knots = _grid_settings(p_def, sg_settings)
 
     S_start  = create_sparse_grid_structure(N, w_start,  level_to_knots, knots_funcs, domains)
     S_target = create_sparse_grid_structure(N, w_target, level_to_knots, knots_funcs, domains)
@@ -912,10 +999,32 @@ def run_phase_3(config):
             else:
                 df_test = pd.read_csv(validation_file)
         except Exception as e:
-            print(f"ERROR: Could not read validation file '{validation_file}'. Details: {e}")
-            return
+            raise ValueError(f"Could not read validation file '{validation_file}': {e}")
 
         test_points = df_test[dim_names].values.T.astype(float)
+
+        validation_metrics = []
+        for qty in qoi_columns:
+            if qty not in df_test.columns:
+                continue
+            truth = df_test[qty].values.astype(float)
+            if not np.all(np.isfinite(truth)):
+                raise ValueError(f"Validation values for '{qty}' must be finite.")
+            for model_name in ("base", "informed"):
+                prediction = evaluate_sparse_grid_interpolant(test_points, **models[qty][model_name])
+                error = prediction - truth
+                validation_metrics.append({
+                    "quantity": qty, "model": model_name, "point_count": len(truth),
+                    "rmse": float(np.sqrt(np.mean(error ** 2))),
+                    "mae": float(np.mean(np.abs(error))),
+                    "max_absolute_error": float(np.max(np.abs(error))),
+                    "p95_absolute_error": float(np.quantile(np.abs(error), 0.95)),
+                    "bias": float(np.mean(error)),
+                })
+        os.makedirs(output_dir, exist_ok=True)
+        pd.DataFrame(validation_metrics).to_csv(
+            os.path.join(output_dir, f"{proj_name}_validation_metrics.csv"), index=False
+        )
 
         plot_columns = _resolve_plot_columns(config.get("plotting", {}), qoi_specs)
         for qty in plot_columns:
@@ -928,8 +1037,14 @@ def run_phase_3(config):
             pred_base = evaluate_sparse_grid_interpolant(test_points, **models[qty]["base"])
             pred_inf  = evaluate_sparse_grid_interpolant(test_points, **models[qty]["informed"])
 
-            error_base = 100.0 * np.abs(pred_base - true_values) / (np.abs(true_values) + 1e-12)
-            error_inf  = 100.0 * np.abs(pred_inf  - true_values) / (np.abs(true_values) + 1e-12)
+            # Normalize percentage errors by the reference range over the test set.
+            # A constant reference has no such range; absolute metrics remain valid.
+            reference_range = float(np.max(true_values) - np.min(true_values))
+            if reference_range == 0.0:
+                print(f"  - Constant reference for '{qty}': percentage plots skipped; absolute metrics are available.")
+                continue
+            error_base = 100.0 * np.abs(pred_base - true_values) / reference_range
+            error_inf = 100.0 * np.abs(pred_inf - true_values) / reference_range
 
             print(f"  - Average Error for '{qty}': Baseline={error_base.mean():.2f}%, Informed={error_inf.mean():.2f}%")
 

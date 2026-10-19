@@ -1,67 +1,54 @@
 {
-    "project_name": "example_project",
+    "project_name": "my_project",
+    "data_dir": "data",
     "output_dir": "output",
-    "data_dir": "hifi-data",
-
     "problem_definition": {
-        "dim_names": ["y1", "y2", "y3"],
-        "domains": [
-            [0.0, 1.0],
-            [0.0, 1.0],
-            [0.0, 1.0]
+        "dim_names": [
+            "x1",
+            "x2"
         ],
-        "pdfs": [
-            {"type": "uniform"},
-            {"type": "normal", "params": {"mu": 0.0, "sigma": 1.0}},
-            {"type": "triangular"}
+        "domains": [
+            [
+                0.0,
+                1.0
+            ],
+            [
+                0.0,
+                1.0
+            ]
         ],
         "output_quantities": [
-            "qoi_scalar",
-            {
-                "name": "qoi_vector",
-                "size": 100,
-                "label": "t",
-                "pad": 4,
-                "plot_indices": [0, 10, 50, 99]
-            }
+            "response"
         ]
     },
-
     "sparse_grid_settings": {
+        "grid_type": "CC",
         "base_level": 2,
         "target_level": 3
     },
-
     "refinement_settings": {
-        "refinement_criterion": "qoi_vector",
-        "use_auto_budget": true,
-        "auto_budget_method": "threshold",
-        "auto_budget_threshold": 0.10,
-        "max_budget": 20
+        "refinement_criterion": "response",
+        "indicator_type": "symmetric_relative",
+        "budget_percent": 20,
+        "include_ties": true
     },
-
     "validation": {
-        "validation_data_file": "validation-data.dat"
+        "validation_data_file": ""
     },
-
     "plotting": {
-        "plot_resolution": 50,
+        "plot_resolution": 40,
         "slices_2d": [
-            {"fixed": {"y3": 0.5}, "varying": ["y1", "y2"]}
-        ],
-        "plot_quantities": ["qoi_scalar", "qoi_vector"]
-    },
-
-    "statistics": {
-        "enabled": true,
-        "quantiles": [0.05, 0.5, 0.95],
-        "quad_order": 200,
-        "export_lagrange_coeffs": true,
-        "vector_metrics": ["l2", "mean", "rms", "max"],
-        "plot_vector_mean_std": true,
-        "exceedance": [
-            {"qoi": "qoi_scalar", "threshold": 0.8},
-            {"qoi": "qoi_vector", "metric": "l2", "threshold": 2.0}
+            {
+                "varying": [
+                    "x1",
+                    "x2"
+                ],
+                "fixed": {}
+            }
         ]
+    },
+    "statistics": {
+        "enabled": false,
+        "export_lagrange_coeffs": false
     }
 }

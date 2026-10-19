@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "bifidelity-sparse-grid"
+version = "0.2.0"
+description = "Three-phase bifidelity sparse-grid interpolation for external simulations"
+readme = "README.md"
+license = {file = "LICENSE"}
+requires-python = ">=3.10"
+dependencies = ["numpy", "scipy", "pandas", "matplotlib"]
+
+[project.scripts]
+sparse-grid = "bifidelity_sparse_grid.cli:main"
+
+[project.urls]
+Repository = "https://github.com/cfdlab-unipi/bifidelity-sparse-grid"
+
+[tool.setuptools.packages.find]
+include = ["bifidelity_sparse_grid*"]
+
+[tool.setuptools.package-data]
+bifidelity_sparse_grid = ["data/*.csv", "data/*.md", "templates/*.json", "templates/*.md"]

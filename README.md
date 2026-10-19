@@ -1,121 +1,195 @@
-# Surrogate-Informed Sparse Grid Toolkit
+# Bifidelity Sparse Grid Toolkit
 
-This toolkit provides a complete, three‑phase workflow for building surrogate models with surrogate-informed sparse grids. It is designed to reduce the number of expensive evaluations (e.g., simulations or experiments) by selecting the most informative points for refinement.
+Python tools for building sparse-grid surrogate models from simulation or
+experimental data. The method uses the discrepancy between a baseline
+interpolant and a coarser auxiliary interpolant to select additional evaluation
+points on a target grid. Values at unselected target nodes are interpolated
+from the baseline model.
 
-The process compares a `Baseline Model`, built on an initial coarse grid, with a final `Informed Model`, which has been refined with new, strategically chosen data points.
-
-## Features
-
-- **Structured 3‑Phase Workflow**: From baseline grid generation to final analysis.
-- **Adaptive Refinement**: Selects new points based on a user‑defined criterion.
-- **Automated Budgeting**: Optional “elbow” or “threshold” selection of refinement count.
-- **Comprehensive Analysis**: Error plots, response surfaces, and diagnostics.
-- **Configuration‑Driven**: Single `config.json` controls the workflow.
-- **Command‑Line Interface**: Clean and repeatable execution.
+The workflow supports scalar and vector outputs, Clenshaw–Curtis and Leja
+nodes, independent validation, response-surface plots, and statistics weighted
+by the input probability distributions.
 
 ## Installation
 
-1.  **Clone the repository:**
-    ```bash
-    git clone <your-repository-url>
-    cd <your-repository-directory>
-    ```
+Requires Python 3.10 or later. NumPy, SciPy, pandas, and Matplotlib are installed
+as dependencies.
 
-2.  **Create a virtual environment (recommended):**
-    ```bash
-    python -m venv venv
-    source venv/bin/activate  # On Windows, use `venv\Scripts\activate`
-    ```
-
-3.  **Install dependencies:**
-    Then, install them using pip:
-    ```bash
-    pip install -r requirements.txt
-    ```
-
-## Quick Start
-
-1. Copy the template configuration:
-   ```bash
-   cp config.example.json config.json
-   ```
-2. Edit `config.json` with your problem definition and QoIs.
-3. Run the three workflow phases in order:
-   ```bash
-   python main.py --phase 1
-   python main.py --phase 2
-   python main.py --phase 3
-   ```
-
-## The Three‑Phase Workflow
-
-The core of this toolkit is a three-step process designed to build a high-fidelity model efficiently.
-
-### Phase 1: Generate Baseline Grid
-The script generates a coarse sparse grid and writes the point coordinates to a template file.
-- **Your action:** copy the template (suffix `_to_fill`) to a new file without that suffix, then fill the output columns.
-
-### Phase 2: Select Refinement Points
-Using Phase‑1 data, the script computes a discrepancy indicator on candidate points and selects the most informative ones. These are written to a new template file.
-- **Your action:** copy the template to a new file without `_to_fill`, then evaluate only the selected points and fill the results.
-
-### Phase 3: Final Analysis & Plotting
-The script combines baseline and refinement data, then builds and compares two models:
-1.  **Baseline Model**: The original, coarse model from Phase 1.
-2.  **Informed Model**: The final, refined model using all available data.
-
-It performs a validation check (if validation data is provided) and generates a suite of plots to visualize the improvements in accuracy and detail.
+```bash
+git clone https://github.com/cfdlab-unipi/bifidelity-sparse-grid.git
+cd bifidelity-sparse-grid
+python -m pip install .
+```
 
 ## Usage
 
-The entire workflow is managed through `main.py` using command-line arguments. You must execute each phase in order.
-
-### Step 1: Execute Phase 1
-This will create the initial template file. For a project named `prjct` will generate `hifi-data/prjct_phase1_to_fill.dat`.
+Create a project directory:
 
 ```bash
-python main.py --phase 1
+sparse-grid init ../my-study
+cd ../my-study
 ```
 
-Action required: copy the template to `hifi-data/prjct_phase1.dat`, then fill the output columns.
-
-### Phase 2: Fill the refinement points
-After filling the Phase 1 file, run this command. It will analyze your data, select the best new points, and generate `hifi-data/prjct_phase2_to_fill.dat`. It also saves a plot (`output/prjct_phase2_discrepancy_plot.png`) showing which points were selected.
+The directory contains `config.json`, `data/`, `output/`, and a project README.
+Edit `config.json` to define the input parameters, their domains, the output
+quantities, the grid levels, and the refinement budget. Then check the settings:
 
 ```bash
-python main.py --phase 2
+sparse-grid check
 ```
 
-Action required: copy the template to `hifi-data/prjct_phase2.dat`, then fill the new points.
-
-### Phase 3: Analyze the data
-Once both data files are complete, run the final phase. This will perform the full analysis, compare the models, and save all plots to the output directory.
+### 1. Evaluate the baseline grid
 
 ```bash
-python main.py --phase 3
+sparse-grid --phase 1
 ```
 
-## Configuration and File Formats
+Copy `data/my-study_phase1_to_fill.dat` to `data/my-study_phase1.dat`.
+Run the simulation at every listed point and fill all output columns.
+Keep the input coordinates and column names unchanged.
 
-Use `config.example.json` as a starting point.
-For the full configuration reference and file format examples, see `DETAILS.md`.
+### 2. Evaluate the selected refinement points
 
-## Outputs
+```bash
+sparse-grid --phase 2
+```
 
-All generated files are placed in the directory specified by `output_dir` in the config.
+Copy `data/my-study_phase2_to_fill.dat` to `data/my-study_phase2.dat`.
+Fill all automatically selected points. The second section lists optional
+additional points; their output values may be left empty. Provide the file
+also when no points have been selected.
 
-- **`{project_name}_phase2_discrepancy_plot.png`**: (From Phase 2) A bar chart showing the importance of each candidate point and which ones were selected.
-- **`error_barchart_{qty}.png`**: (From Phase 3) Compares the prediction error of the baseline vs. informed model for each point in the validation set.
-- **`error_distribution_{qty}.png`**: (From Phase 3) A histogram showing the distribution of prediction errors for both models.
-- **`response_surface_{qty}_{slice}.png`**: (From Phase 3) A side-by-side comparison of the response surfaces generated by the baseline and informed models for a specific 2D slice.
-- **`response_surface_poly_w{w}_{qty}_{slice}.png`**: (From Phase 3) Single-panel polynomial response surface at level `w` (generated for both `w` and `w+1`).
-- **`quadrature_points_{slice}.png`**: (From Phase 3) A scatter plot showing the distribution of baseline points, candidate points, and newly selected refinement points on a 2D slice.
-- **`statistics/*.csv`**: (From Phase 3) Weighted statistics (see `DETAILS.md`).
-- **`statistics/stats_<qoi>_mean_std.png`**: (From Phase 3) Mean ± std plot along vector index (vector QoIs only).
-- **`polynomials/lagrange_coeffs_w{w}_{qoi}.csv`**: (From Phase 3) Lagrange coefficients for the polynomial interpolant at levels `w` and `w+1` (see `DETAILS.md`).
+### 3. Analyze the surrogate models
+
+```bash
+sparse-grid --phase 3
+```
+
+This builds the baseline and refined models and writes plots, selection
+summaries, and any requested validation metrics or statistics to `output/`.
+Use the same configuration throughout the three phases. The toolkit writes
+point files; run your external simulation separately to supply their values.
+See [the data workflow](docs/workflow.md) for file formats and repeated runs.
+
+Paths in `config.json` are relative to the configuration file. To run a project
+from another directory, specify its configuration:
+
+```bash
+sparse-grid --phase 1 --config /path/to/my-study/config.json
+```
+
+`python -m bifidelity_sparse_grid` accepts the same arguments as `sparse-grid`.
+
+## Configuration
+
+The default configuration defines a two-input scalar problem.
+[`config.example.json`](config.example.json) provides the same settings for
+inspection or manual setup: copy it to `config.json` in your project directory
+and edit it for your study. A template with scalar and vector outputs is also
+available:
+
+```bash
+sparse-grid init ../vector-study --template vector
+```
+
+| Setting | Description |
+| --- | --- |
+| `grid_type` | `CC`, `leja_line`, `leja_sym`, or `auto` for PDF-based node selection |
+| `base_level`, `target_level` | Baseline and target sparse-grid levels |
+| `indicator_type` | `absolute` or `symmetric_relative` discrepancy |
+| `budget_percent` | Nominal percentage of new target points to evaluate |
+| `max_budget` | Fixed point count, or nominal cap for automatic selection |
+| `include_ties` | Include points with nearly equal indicators at the selection cutoff |
+
+With `include_ties=true`, the actual count may exceed the nominal budget.
+Set it to `false` for a strict count limit. Equal levels for CC and Leja do
+not imply equal evaluation counts.
+
+The classical and symmetric Leja sequences contain 31 one-dimensional nodes
+each. Larger multidimensional grids can be constructed from these prefixes;
+a rule requiring more than 31 nodes in one direction is not supported.
+PDF-weighted Leja nodes are generated numerically from the specified distribution.
+
+See the [configuration reference](docs/configuration.md) for PDF definitions,
+vector outputs, automatic budget selection, validation, and statistics.
+
+## Examples
+
+Run from the repository directory after installation:
+
+```bash
+python examples/run_example.py --case ishigami --grid CC
+python examples/run_example.py --case oscillatory --grid leja_sym
+```
+
+The examples execute all three phases using analytical functions and validate
+the models on 1024 scrambled-Sobol points. Results are saved in
+`examples/output/<case>_<grid>/`. Use `--budget-percent` to change the budget
+or `--output-dir` to choose another output directory.
+
+Function definitions and parameters are documented in [examples/README.md](examples/README.md).
+
+## Output files
+
+| Output | Contents |
+| --- | --- |
+| `<project>_selection.csv` | Candidate coordinates, indicators, and selected flags |
+| `<project>_selection.json` | Grid settings and nominal and actual evaluation counts |
+| `<project>_validation_metrics.csv` | RMSE, mean and maximum absolute error, 95th percentile absolute error, and bias |
+| `*.png` | Selection, model-slice, grid-point, and validation plots |
+| `statistics/` | Optional weighted statistics |
+| `polynomials/` | Optional polynomial coefficients |
+
+To enable validation, set `validation.validation_data_file` to a CSV or
+whitespace-separated file with the configured input and output columns.
+Absolute errors have the output's physical units. Percentage plots are
+normalized by the reference range over the validation set. The CSV column
+`mae` is mean absolute error; `max_absolute_error` is maximum absolute error.
+Refinement need not reduce every error metric at every budget.
+
+## Repository structure
+
+```text
+bifidelity_sparse_grid/   Python package, node data, and configuration templates
+docs/                    Workflow, configuration, method, and development guides
+examples/                Analytical examples
+tests/                   Numerical and workflow checks
+config.example.json      Scalar configuration for reference or manual setup
+main.py                  Launcher from the source checkout
+pyproject.toml           Package metadata and dependencies
+```
+
+## Tests
+
+From the repository directory, after installation:
+
+```bash
+python tests/check_numerics.py
+python tests/check_workflow.py
+python tests/check_cli.py
+```
+
+These check interpolation, Leja rules, quadrature, point selection, file
+handling, and installed commands. See [development and packaging](docs/development.md)
+for editable installation, test coverage, and distribution builds.
+
+## Documentation
+
+- [Workflow](docs/workflow.md): simulation files, validation, paths, and repeated runs.
+- [Configuration](docs/configuration.md): all settings, defaults, and numerical options.
+- [Method](docs/method.md): grids, discrepancy indicators, selection, and reconstruction.
+- [Development](docs/development.md): tests, package resources, and distribution builds.
+
+## License
+
+[MIT](LICENSE).
+
+## Reference
+
+M. Rosellini, F. Fruzza, A. Mariotti, M. V. Salvetti, and L. Tamellini.
+*A bifidelity sparse-grid surrogate model driven by a discrepancy indicator*.
+Manuscript, 2026.
 
 ## Contact
 
-For questions, suggestions, or support, please contact:
-- matteo.rosellini@phd.unipi.it
-- filippo.fruzza@ing.unipi.it
+[cfdlab.unipi@gmail.com](mailto:cfdlab.unipi@gmail.com)

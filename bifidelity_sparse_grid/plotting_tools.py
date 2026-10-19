@@ -21,7 +21,7 @@ import matplotlib.pyplot as plt
 from matplotlib.gridspec import GridSpec
 from matplotlib.patches import Patch
 
-from sparse_grid_toolbox import evaluate_sparse_grid_interpolant
+from .sparse_grid_toolbox import evaluate_sparse_grid_interpolant
 
 # -----------------------------------------------------------------------------
 # Global colors (override from caller if needed)
@@ -247,6 +247,11 @@ def plot_combined_response_surfaces(
 
     global_min = min(F_base.min(), F_inf.min())
     global_max = max(F_base.max(), F_inf.max())
+    # A constant output still needs distinct contour levels for a valid plot.
+    if global_max == global_min:
+        margin = max(1.0, abs(global_min)) * 1e-8
+        global_min -= margin
+        global_max += margin
     levels = np.linspace(global_min, global_max, n_levels)
     if cmap is None:
         cmap = "viridis" if val_name.lower().startswith("v") else "inferno"
@@ -292,7 +297,8 @@ def plot_combined_response_surfaces(
     else:
         title = f"Response surface for {val_name} (full domain)"
     fig.suptitle(title, fontsize=title_fontsize + 2)
-    fig.tight_layout(rect=[0, 0, 1, 0.95])
+    # GridSpec already positions the shared colorbar; leave room for the title.
+    fig.subplots_adjust(left=0.08, right=0.93, bottom=0.15, top=0.82)
 
     _finalize_plot(
         fig,

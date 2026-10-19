@@ -1,0 +1,73 @@
+{
+    "project_name": "example_project",
+    "output_dir": "output",
+    "data_dir": "hifi-data",
+
+    "problem_definition": {
+        "dim_names": ["y1", "y2", "y3"],
+        "domains": [
+            [0.0, 1.0],
+            [0.0, 1.0],
+            [0.0, 1.0]
+        ],
+        "pdfs": [
+            {"type": "uniform"},
+            {"type": "normal", "params": {"mu": 0.0, "sigma": 1.0}},
+            {"type": "triangular"}
+        ],
+        "output_quantities": [
+            "qoi_scalar",
+            {
+                "name": "qoi_vector",
+                "size": 100,
+                "label": "t",
+                "pad": 4,
+                "plot_indices": [0, 10, 50, 99]
+            }
+        ]
+    },
+
+    "sparse_grid_settings": {
+        "base_level": 2,
+        "target_level": 3,
+        "auxiliary_level": 1,
+        "grid_type": "auto"
+    },
+
+    "refinement_settings": {
+        "refinement_criterion": "qoi_vector",
+        "indicator_type": "symmetric_relative",
+        "relative_epsilon": 1e-5,
+        "include_ties": true,
+        "tie_tolerance": 1e-3,
+        "use_auto_budget": true,
+        "auto_budget_method": "threshold",
+        "auto_budget_threshold": 0.10,
+        "max_budget": 20
+    },
+
+    "validation": {
+        "validation_data_file": ""
+    },
+
+    "plotting": {
+        "plot_resolution": 50,
+        "slices_2d": [
+            {"fixed": {"y3": 0.5}, "varying": ["y1", "y2"]}
+        ],
+        "plot_quantities": ["qoi_scalar", "qoi_vector"]
+    },
+
+    "statistics": {
+        "enabled": true,
+        "quantiles": [0.05, 0.5, 0.95],
+        "quad_order": 200,
+        "export_lagrange_coeffs": true,
+        "vector_metrics": ["l2", "mean", "rms", "max"],
+        "plot_vector_mean_std": true,
+        "exceedance": [
+            {"qoi": "qoi_scalar", "threshold": 0.8},
+            {"qoi": "qoi_vector", "metric": "l2", "threshold": 2.0}
+        ]
+    }
+}

@@ -1,0 +1,54 @@
+{
+    "project_name": "my_project",
+    "data_dir": "data",
+    "output_dir": "output",
+    "problem_definition": {
+        "dim_names": [
+            "x1",
+            "x2"
+        ],
+        "domains": [
+            [
+                0.0,
+                1.0
+            ],
+            [
+                0.0,
+                1.0
+            ]
+        ],
+        "output_quantities": [
+            "response"
+        ]
+    },
+    "sparse_grid_settings": {
+        "grid_type": "CC",
+        "base_level": 2,
+        "target_level": 3
+    },
+    "refinement_settings": {
+        "refinement_criterion": "response",
+        "indicator_type": "symmetric_relative",
+        "budget_percent": 20,
+        "include_ties": true
+    },
+    "validation": {
+        "validation_data_file": ""
+    },
+    "plotting": {
+        "plot_resolution": 40,
+        "slices_2d": [
+            {
+                "varying": [
+                    "x1",
+                    "x2"
+                ],
+                "fixed": {}
+            }
+        ]
+    },
+    "statistics": {
+        "enabled": false,
+        "export_lagrange_coeffs": false
+    }
+}
