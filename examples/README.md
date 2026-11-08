@@ -41,6 +41,8 @@ By default, files go to `examples/output/<case>_<grid>/`:
 - `analysis/`: selections, figures, validation metrics, and weighted statistics.
 
 Read `analysis/<case>_selection.json` for nominal and actual evaluation counts.
+The multidimensional sparse-grid quadrature weights include negative values, so
+`analysis/statistics/` reports moments, while quantiles are written as NaN.
 Read `analysis/<case>_validation_metrics.csv` for accuracy: `mae` is mean
 absolute error; `max_absolute_error` is the maximum. Error metrics have the
 function's units. Percentage errors use the reference range over the validation set.

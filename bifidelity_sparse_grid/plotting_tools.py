@@ -8,13 +8,12 @@
 # Conventions:
 #   - Global colors are defined at the top of the file and can be overridden
 #     per-function via keyword arguments.
-#   - If save_path is provided, the figure is saved; in all cases the plot is
-#     shown and the figure is closed.
+#   - If save_path is provided, the figure is saved and closed without being
+#     shown, so a workflow phase never waits for a window to be closed.
+#     Without save_path the plot is shown, then closed.
 # =============================================================================
 
 """Plotting utilities for the adaptive sparse-grid workflow."""
-
-from __future__ import annotations
 
 import numpy as np
 import matplotlib.pyplot as plt
@@ -39,18 +38,21 @@ def _finalize_plot(fig, save_path=None, save_dpi=300, save_msg=None):
     """
     Save/show/close helper.
 
-    If save_path is provided, the figure is saved. The plot is always shown and
-    then the figure is closed to release resources.
+    If save_path is provided, the figure is saved and not shown: with an
+    interactive Matplotlib backend, plt.show() would stop the workflow at every
+    figure. Without save_path the plot is shown. The figure is then closed to
+    release resources.
     """
     if save_path:
         fig.savefig(save_path, dpi=save_dpi, bbox_inches="tight")
         if save_msg:
             print(save_msg)
-    plt.show()
+    else:
+        plt.show()
     plt.close(fig)
 
 
-def _extract_slice_info(slice_info: dict, dim_names: list[str], domains: list[tuple[float, float]]):
+def _extract_slice_info(slice_info, dim_names, domains):
     """
     Return (varying_dims, fixed_dims) from either key style and fill missing fixed dims
     with midpoints to avoid KeyError.
@@ -67,6 +69,16 @@ def _extract_slice_info(slice_info: dict, dim_names: list[str], domains: list[tu
             fixed_dims[dim] = 0.5 * (domains[i][0] + domains[i][1])
 
     return varying_dims, fixed_dims
+
+
+def _knots_on_slice(knots, fixed_indices, fixed_values, tol=1e-9):
+    """Keep the nodes (columns of knots) whose fixed coordinates equal the slice values."""
+    if knots.shape[1] == 0:
+        return np.empty((knots.shape[0], 0))
+    on_slice = np.ones(knots.shape[1], dtype=bool)
+    for index, value in zip(fixed_indices, fixed_values):
+        on_slice = on_slice & np.isclose(knots[index, :], value, atol=tol)
+    return knots[:, on_slice]
 
 
 # -----------------------------------------------------------------------------
@@ -91,9 +103,8 @@ def plot_error_comparison_barchart(
 ):
     """
     Bar chart comparing prediction errors on validation points.
-    Accepts either:
-      - columns: 'Baseline Model Error [%]' and 'Informed Model Error [%]'
-      - legacy columns: 'Errore Base {val_name} [%]' and 'Errore Hybrid {val_name} [%]'
+    df_results needs the columns 'Baseline Model Error [%]' and
+    'Informed Model Error [%]'; 'TestID' labels the points if present.
     """
     if baseline_color is None:
         baseline_color = BASELINE_COLOR
@@ -102,18 +113,11 @@ def plot_error_comparison_barchart(
 
     fig, ax = plt.subplots(figsize=figsize)
 
-    if "Baseline Model Error [%]" in df_results.columns:
-        err_base = df_results["Baseline Model Error [%]"]
-        err_inf = df_results["Informed Model Error [%]"]
-        x_labels = df_results.get("TestID", df_results.index)
-        label_base = "Baseline model"
-        label_inf = "Informed model"
-    else:
-        err_base = df_results[f"Errore Base {val_name} [%]"]
-        err_inf = df_results[f"Errore Hybrid {val_name} [%]"]
-        x_labels = df_results.get("Test", df_results.index)
-        label_base = "Baseline model"
-        label_inf = "Hierarchical model"
+    err_base = df_results["Baseline Model Error [%]"]
+    err_inf = df_results["Informed Model Error [%]"]
+    x_labels = df_results.get("TestID", df_results.index)
+    label_base = "Baseline model"
+    label_inf = "Informed model"
 
     x = np.arange(len(err_base))
 
@@ -308,80 +312,6 @@ def plot_combined_response_surfaces(
     )
 
 
-def plot_response_surface(
-    slice_info,
-    domains,
-    dim_names,
-    grid_resolution,
-    model,
-    val_name,
-    title,
-    save_path=None,
-    figsize=(8, 6),
-    n_levels=21,
-    n_contours=8,
-    contour_linewidth=0.8,
-    label_fontsize=12,
-    title_fontsize=14,
-    tick_fontsize=10,
-    cbar_label_fontsize=12,
-    cmap=None,
-    save_dpi=300,
-):
-    """Single-panel response surface plot for one model."""
-    varying_dims, fixed_dims = _extract_slice_info(slice_info, dim_names, domains)
-
-    idx_vary_1, idx_vary_2 = dim_names.index(varying_dims[0]), dim_names.index(varying_dims[1])
-    range_1 = np.linspace(domains[idx_vary_1][0], domains[idx_vary_1][1], grid_resolution)
-    range_2 = np.linspace(domains[idx_vary_2][0], domains[idx_vary_2][1], grid_resolution)
-    Grid_1, Grid_2 = np.meshgrid(range_1, range_2)
-
-    eval_points = np.zeros((len(dim_names), Grid_1.size))
-    for i, dim in enumerate(dim_names):
-        if dim == varying_dims[0]:
-            eval_points[i, :] = Grid_1.ravel()
-        elif dim == varying_dims[1]:
-            eval_points[i, :] = Grid_2.ravel()
-        else:
-            eval_points[i, :] = fixed_dims[dim]
-
-    F = evaluate_sparse_grid_interpolant(eval_points, **model).reshape(Grid_1.shape)
-
-    levels = np.linspace(F.min(), F.max(), n_levels)
-    if cmap is None:
-        cmap = "viridis" if val_name.lower().startswith("v") else "inferno"
-
-    fig, ax = plt.subplots(figsize=figsize)
-    contour_mappable = ax.contourf(Grid_1, Grid_2, F, levels=levels, cmap=cmap)
-    contours = ax.contour(
-        Grid_1,
-        Grid_2,
-        F,
-        levels=n_contours,
-        colors="black",
-        linestyles="dashed",
-        linewidths=contour_linewidth,
-    )
-    ax.clabel(contours, inline=True, fontsize=tick_fontsize, fmt="%.2f")
-    ax.set_title(title, fontsize=title_fontsize)
-    ax.set_xlabel(f"{varying_dims[0]}", fontsize=label_fontsize)
-    ax.set_ylabel(f"{varying_dims[1]}", fontsize=label_fontsize)
-    ax.tick_params(axis="both", which="major", labelsize=tick_fontsize)
-    ax.grid(True, linestyle="--", alpha=0.5)
-
-    cbar = fig.colorbar(contour_mappable, ax=ax)
-    cbar.set_label(val_name, fontsize=cbar_label_fontsize)
-    cbar.ax.tick_params(axis="y", which="major", labelsize=tick_fontsize)
-
-    fig.tight_layout()
-    _finalize_plot(
-        fig,
-        save_path=save_path,
-        save_dpi=save_dpi,
-        save_msg=f"  -> Saved response surface to: {save_path}",
-    )
-
-
 # -----------------------------------------------------------------------------
 # Discrepancy and quadrature points
 # -----------------------------------------------------------------------------
@@ -409,8 +339,10 @@ def plot_discrepancy_by_point(
         print("     - WARNING: No candidate points to plot.")
         return
 
-    sorted_data = sorted(zip(indicators, candidate_tuples), key=lambda item: item[0], reverse=True)
-    sorted_indicators = [item[0] for item in sorted_data]
+    # Indicator values from largest to smallest. The selected points are the
+    # first `budget` ones in this order (candidate_tuples is kept in the
+    # signature for compatibility; the plot needs only the values).
+    sorted_indicators = np.sort(np.asarray(indicators, dtype=float))[::-1]
     num_candidates = len(sorted_indicators)
     x_positions = np.arange(num_candidates)
     colors = [selected_color] * budget + [discarded_color] * (num_candidates - budget)
@@ -473,22 +405,16 @@ def plot_quadrature_points_slice(
         selected_color = CANDIDATE_SELECTED_COLOR
     print(f"  -> Generating quadrature points plot for slice {varying_dims[0]}-{varying_dims[1]}...")
 
-    def filter_knots(knots, fixed_indices, fixed_values, tol=1e-9):
-        if knots.shape[1] == 0:
-            return np.empty((knots.shape[0], 0))
-        mask = np.all(
-            np.isclose(knots[fixed_indices, :], np.array(fixed_values)[:, np.newaxis], atol=tol),
-            axis=0,
-        )
-        return knots[:, mask]
-
     idx_vary_1, idx_vary_2 = dim_names.index(varying_dims[0]), dim_names.index(varying_dims[1])
-    fixed_indices = [dim_names.index(d) for d in fixed_dims.keys()]
-    fixed_values = list(fixed_dims.values())
+    fixed_indices = []
+    fixed_values = []
+    for d, value in fixed_dims.items():
+        fixed_indices.append(dim_names.index(d))
+        fixed_values.append(value)
 
-    base_slice_knots = filter_knots(base_knots, fixed_indices, fixed_values)
-    target_slice_knots = filter_knots(target_knots, fixed_indices, fixed_values)
-    selected_slice_knots = filter_knots(selected_knots, fixed_indices, fixed_values)
+    base_slice_knots = _knots_on_slice(base_knots, fixed_indices, fixed_values)
+    target_slice_knots = _knots_on_slice(target_knots, fixed_indices, fixed_values)
+    selected_slice_knots = _knots_on_slice(selected_knots, fixed_indices, fixed_values)
 
     fig, ax = plt.subplots(figsize=figsize)
     ax.scatter(

@@ -115,4 +115,46 @@ for budget_percent, budget_mode in [(0, "percent"), (1, "percent"), (20, "percen
                 else:
                     raise AssertionError("Missing selected evaluations must be rejected.")
         print(f"PASS: vector workflow, selection {budget_mode} ({budget_percent}), file I/O, metrics, and required-point checks")
+
+# Large physical inputs (here 1e5 to 2e6, e.g. pressures in Pa) and files
+# written with fewer decimals must still be matched to the grid nodes. Before
+# coordinate snapping, both cases stopped Phase 2 with a KeyError.
+for case_name, domain, dimension, base_level, decimals in [("large", [1e5, 2e6], 3, 4, None), ("decimals", [0.0, 1.0], 2, 2, 6)]:
+    with tempfile.TemporaryDirectory(prefix="sparse_grid_snap_") as temporary:
+        folder = Path(temporary)
+        names = ["x", "y", "z"][:dimension]
+        config = {
+            "project_name": case_name,
+            "data_dir": str(folder),
+            "output_dir": str(folder),
+            "problem_definition": {"dim_names": names, "domains": [domain] * dimension, "output_quantities": ["r"]},
+            "sparse_grid_settings": {"grid_type": "CC", "base_level": base_level, "target_level": base_level + 1},
+            "refinement_settings": {"refinement_criterion": "r", "indicator_type": "symmetric_relative", "budget_percent": 100},
+            "plotting": {"slices_2d": [], "plot_resolution": 10},
+            "statistics": {"enabled": True, "export_lagrange_coeffs": False,
+                           "exceedance": [{"qoi": "r", "threshold": 1.0}]},
+        }
+
+        def response(table):
+            # Smooth test function of the inputs scaled to [0, 1].
+            scaled = (table[names].values - domain[0]) / (domain[1] - domain[0])
+            return np.exp(scaled.sum(axis=1) / dimension) + 0.3 * np.sin(5 * scaled[:, 0])
+
+        with contextlib.redirect_stdout(io.StringIO()):
+            run_phase_1(config)
+            baseline = pd.read_csv(folder / f"{case_name}_phase1_to_fill.dat", sep=r"\s+")
+            baseline["r"] = response(baseline)
+            float_format = None if decimals is None else f"%.{decimals}f"
+            baseline.to_csv(folder / f"{case_name}_phase1.dat", sep="\t", index=False, float_format=float_format)
+            run_phase_2(config)
+            selection = pd.read_csv(folder / f"{case_name}_selection.csv")
+            refinement = selection.loc[selection["selected"], names].copy()
+            refinement["r"] = response(refinement)
+            refinement.to_csv(folder / f"{case_name}_phase2.dat", sep="\t", index=False, float_format=float_format)
+            run_phase_3(config)
+        statistics = pd.read_csv(folder / "statistics" / "stats_r.csv")
+        assert np.isfinite(statistics["mean"].iloc[0])
+        # Multidimensional Smolyak weights are signed: no quantiles or probabilities.
+        assert statistics["q0.050"].isna().all() and statistics["P_gt_1.0"].isna().all()
+        print(f"PASS: coordinate snapping workflow ({case_name})")
 print("All workflow checks passed.")

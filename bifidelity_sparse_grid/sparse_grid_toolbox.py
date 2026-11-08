@@ -12,11 +12,8 @@ The weighted Leja sequence is built by recursively maximizing:
 i.e. score(t) = 0.5*log(rho(t)) + Σ log(|t - t_k|).
 """
 
-from __future__ import annotations
-
 import numpy as np
 from dataclasses import dataclass
-from typing import Callable, Dict, List, Optional, Sequence, Tuple, Union
 from scipy.special import comb
 # Re-export the established node functions so existing numerical calls keep
 # their names while the one-dimensional rules remain in a small module.
@@ -30,19 +27,19 @@ from .nodes import (
 # Level-to-knots functions (nestedness-aware)
 # =============================================================================
 
-def lev2knots_lin(level: int) -> int:
+def lev2knots_lin(level):
     """m(i_n)=i_n (not necessarily nested for all knot families, but ok for Leja)."""
     if level <= 0:
         return 0
     return int(level)
 
-def lev2knots_2step(level: int) -> int:
+def lev2knots_2step(level):
     """m(i_n)=2(i_n-1)+1 => 1,3,5,7,... (good for symmetric Leja)."""
     if level <= 0:
         return 0
     return int(2 * (level - 1) + 1)
 
-def lev2knots_doubling(level: int) -> int:
+def lev2knots_doubling(level):
     """m(1)=1, m(i_n)=2^(i_n-1)+1 => 1,3,5,9,17,... (nested CC, nested trap)."""
     if level <= 0:
         return 0
@@ -50,45 +47,36 @@ def lev2knots_doubling(level: int) -> int:
         return 1
     return int(2 ** (level - 1) + 1)
 
-def lev2knots_tripling(level: int) -> int:
-    """m(i_n)=3^(i_n-1) (nested midpoint)."""
-    if level <= 0:
-        return 0
-    return int(3 ** (level - 1))
 
-
-# =============================================================================
-# 1D knots: Clenshaw-Curtis (uniform) + Weighted Leja (general pdf)
-# =============================================================================
 
 # =============================================================================
 # PDFs (consistent with the usual parametrizations; normalization not required)
 # =============================================================================
 
-def _pdf_uniform(x: np.ndarray, a: float, b: float) -> np.ndarray:
+def _pdf_uniform(x, a, b):
     return np.where((x >= a) & (x <= b), 1.0 / max(b - a, 1e-300), 0.0)
 
-def _pdf_normal(x: np.ndarray, mu: float, sigma: float) -> np.ndarray:
+def _pdf_normal(x, mu, sigma):
     sigma = max(float(sigma), 1e-300)
     return (1.0 / (sigma * np.sqrt(2.0 * np.pi))) * np.exp(-0.5 * ((x - mu) / sigma) ** 2)
 
-def _pdf_exponential(x: np.ndarray, lam: float) -> np.ndarray:
+def _pdf_exponential(x, lam):
     lam = max(float(lam), 1e-300)
     return np.where(x >= 0.0, lam * np.exp(-lam * x), 0.0)
 
-def _pdf_gamma(x: np.ndarray, alpha: float, beta: float) -> np.ndarray:
+def _pdf_gamma(x, alpha, beta):
     # Here we use the "rate" beta > 0; shape parameter as in the SGMK table.
     beta = max(float(beta), 1e-300)
     # Normalization constant is irrelevant for Leja, but keep a consistent shape
     return np.where(x >= 0.0, (x ** alpha) * np.exp(-beta * x), 0.0)
 
-def _pdf_beta_on_interval(x: np.ndarray, a: float, b: float, alpha: float, beta: float) -> np.ndarray:
+def _pdf_beta_on_interval(x, a, b, alpha, beta):
     # Defined on [a,b], shape parameters alpha,beta > -1
     L = max(b - a, 1e-300)
     z = (x - a) / L
     return np.where((z >= 0.0) & (z <= 1.0), (z ** alpha) * ((1.0 - z) ** beta), 0.0)
 
-def _pdf_triangular_decreasing(x: np.ndarray, a: float, b: float) -> np.ndarray:
+def _pdf_triangular_decreasing(x, a, b):
     # decreasing triangular on [a,b] as in SGMK table: rho(x)=2(b-x)/(b-a)^2
     L = max(b - a, 1e-300)
     return np.where((x >= a) & (x <= b), 2.0 * (b - x) / (L ** 2), 0.0)
@@ -101,113 +89,88 @@ def _pdf_triangular_decreasing(x: np.ndarray, a: float, b: float) -> np.ndarray:
 @dataclass(frozen=True)
 class PdfSpec:
     name: str  # 'uniform'|'normal'|'exponential'|'gamma'|'beta'|'triangular'
-    params: Dict[str, float]
+    params: dict
     # optional truncation for unbounded domains (normal, exponential, gamma)
     # Examples:
     #   normal: {'n_sigma': 8}
     #   exponential/gamma: {'q': 12} meaning upper ~= q/beta or q/lam
-    trunc: Optional[Dict[str, float]] = None
+    trunc: dict = None
     symmetric: bool = False  # request symmetric Leja when meaningful
 
 
-def pdfspec_to_domain_and_rho(spec: PdfSpec) -> Tuple[Tuple[float, float], Callable[[np.ndarray], np.ndarray]]:
+SUPPORTED_PDFS = ("uniform", "triangular", "beta", "normal", "exponential", "gamma")
+
+
+def _pdf_values(x, name, p, a, b):
+    """Evaluate the density `name`, with parameters p, at the points x.
+
+    a and b are the interval bounds; they enter the bounded densities only.
+    The default parameter values are those documented in docs/configuration.md.
+    """
+    if name == "uniform":
+        return _pdf_uniform(x, a, b)
+    if name == "triangular":
+        return _pdf_triangular_decreasing(x, a, b)
+    if name == "beta":
+        return _pdf_beta_on_interval(x, a, b, p["alpha"], p["beta"])
+    if name == "normal":
+        return _pdf_normal(x, p.get("mu", 0.0), p.get("sigma", 1.0))
+    if name == "exponential":
+        return _pdf_exponential(x, p.get("lam", 1.0))
+    # gamma: alpha is the shape exponent, beta the rate
+    return _pdf_gamma(x, p.get("alpha", 0.0), p.get("beta", 1.0))
+
+
+def pdfspec_to_domain_and_rho(spec):
     """
     Return (domain=[a,b], rho(x)) for the provided PdfSpec.
     For unbounded supports, use a robust truncation (override via spec.trunc).
     """
     name = spec.name.lower().strip()
-    p = {k: float(v) for k, v in (spec.params or {}).items()}
+    p = {}
+    for key, value in (spec.params or {}).items():
+        p[key] = float(value)
     t = spec.trunc or {}
 
-    # Allow explicit domain override for any PDF via params a,b
-    if "a" in p and "b" in p:
-        a, b = p["a"], p["b"]
-        if name == "uniform":
-            return (a, b), (lambda x: _pdf_uniform(x, a, b))
-        if name == "triangular":
-            return (a, b), (lambda x: _pdf_triangular_decreasing(x, a, b))
-        if name == "beta":
-            alpha, beta = p["alpha"], p["beta"]
-            return (a, b), (lambda x: _pdf_beta_on_interval(x, a, b, alpha, beta))
-        if name == "normal":
-            mu, sigma = p.get("mu", 0.0), p.get("sigma", 1.0)
-            return (a, b), (lambda x: _pdf_normal(x, mu, sigma))
-        if name == "exponential":
-            lam = p.get("lam", 1.0)
-            return (a, b), (lambda x: _pdf_exponential(x, lam))
-        if name == "gamma":
-            alpha = p.get("alpha", 0.0)
-            beta = p.get("beta", 1.0)
-            return (a, b), (lambda x: _pdf_gamma(x, alpha, beta))
+    if name not in SUPPORTED_PDFS:
         raise ValueError(f"Unsupported PdfSpec.name='{spec.name}'")
+    if name == "beta" and ("alpha" not in p or "beta" not in p):
+        # No default at this level: fail now, not at the first evaluation.
+        raise ValueError("Beta PdfSpec requires params alpha and beta.")
 
-    if name == "uniform":
+    # 1) Interval [a, b].
+    if "a" in p and "b" in p:
+        # Explicit bounds are allowed for every PDF (truncation for unbounded ones).
         a, b = p["a"], p["b"]
-        return (a, b), (lambda x: _pdf_uniform(x, a, b))
-
-    if name == "triangular":
+    elif name in ("uniform", "triangular", "beta"):
+        # Bounded PDFs need explicit bounds: a missing key raises KeyError.
         a, b = p["a"], p["b"]
-        return (a, b), (lambda x: _pdf_triangular_decreasing(x, a, b))
-
-    if name == "beta":
-        a, b = p["a"], p["b"]
-        alpha, beta = p["alpha"], p["beta"]
-        return (a, b), (lambda x: _pdf_beta_on_interval(x, a, b, alpha, beta))
-
-    if name == "normal":
+    elif name == "normal":
+        # mu +- n_sigma standard deviations (default 8)
         mu, sigma = p.get("mu", 0.0), p.get("sigma", 1.0)
         n_sigma = float(t.get("n_sigma", 8.0))
         a = mu - n_sigma * sigma
         b = mu + n_sigma * sigma
-        return (a, b), (lambda x: _pdf_normal(x, mu, sigma))
-
-    if name == "exponential":
+    elif name == "exponential":
+        # upper bound q/lam (q default 12 -> exp(-12) ~ 6e-6 of the peak density)
         lam = p.get("lam", 1.0)
-        # choose upper by quantile-like truncation: x_max ~ q/lam (q default 12 -> exp(-12) ~ 6e-6)
         q = float(t.get("q", 12.0))
         a, b = 0.0, q / max(lam, 1e-300)
-        return (a, b), (lambda x: _pdf_exponential(x, lam))
-
-    if name == "gamma":
-        alpha = p.get("alpha", 0.0)
-        beta = p.get("beta", 1.0)  # rate
+    else:
+        # gamma: upper bound q/beta, with beta the rate (q default 20)
+        beta = p.get("beta", 1.0)
         q = float(t.get("q", 20.0))
         a, b = 0.0, q / max(beta, 1e-300)
-        return (a, b), (lambda x: _pdf_gamma(x, alpha, beta))
 
-    raise ValueError(f"Unsupported PdfSpec.name='{spec.name}'")
+    # 2) Density function. Callers need a function of x alone, so the
+    #    parameters and bounds are fixed here.
+    def rho(x):
+        return _pdf_values(x, name, p, a, b)
 
-
-def suggest_lev2knots_for_nestedness(
-    knots_family: str,
-    spec: Optional[PdfSpec] = None,
-) -> Callable[[int], int]:
-    """
-    Heuristic consistent with the SGMK guidance:
-    - Clenshaw–Curtis: doubling
-    - midpoint: tripling
-    - (weighted) Leja: linear is OK; for symmetric Leja prefer 2-step or doubling
-    """
-    kf = knots_family.lower().strip()
-
-    if kf in {"clenshaw-curtis", "cc"}:
-        return lev2knots_doubling
-    if kf in {"midpoint"}:
-        return lev2knots_tripling
-    if kf in {"leja", "weighted-leja", "wleja"}:
-        if spec is not None and bool(spec.symmetric):
-            # add knots in pairs to preserve symmetry
-            return lev2knots_2step
-        return lev2knots_lin
-
-    # default conservative choice
-    return lev2knots_lin
+    return (a, b), rho
 
 
-def make_knots_func_from_pdfspec(
-    spec: PdfSpec,
-    grid_size: int = 2001,
-) -> Tuple[Callable[[int, float, float], np.ndarray], Tuple[float, float]]:
+def make_knots_func_from_pdfspec(spec, grid_size=2001):
     """
     Build a 1D knots function consistent with the provided pdf_spec.
     Returns (knots_func_1d(nn, a, b), domain=(a,b)).
@@ -219,8 +182,10 @@ def make_knots_func_from_pdfspec(
         # Use nested Clenshaw-Curtis for uniform PDFs.
         return knots_cc_1d, domain
 
-    def knots_func(nn: int, x_a: float, x_b: float) -> np.ndarray:
-        # ignore x_a, x_b passed by caller; enforce the spec domain consistently
+    # The grid construction calls knots_func(nn, x_a, x_b) for every rule, so
+    # this small function fixes the PDF and its interval. The x_a, x_b passed
+    # by the caller are ignored; the spec domain is enforced consistently.
+    def knots_func(nn, x_a, x_b):
         return _weighted_leja_1d(
             nn=int(nn),
             x_a=a,
@@ -237,26 +202,30 @@ def make_knots_func_from_pdfspec(
 # Sparse-grid structure (combination technique, total degree)
 # =============================================================================
 
-def tensor_grid_knots(
-    N: int,
-    m: np.ndarray,
-    knots_func_1d: Union[Callable[[int, float, float], np.ndarray], Sequence[Callable[[int, float, float], np.ndarray]]],
-    domains: Sequence[Tuple[float, float]],
-) -> Dict[str, object]:
-    """Build tensor-product grid nodes given per-dimension resolutions."""
+def tensor_grid_knots(N, m, knots_func_1d, domains):
+    """Build tensor-product grid nodes given per-dimension resolutions.
+
+    knots_func_1d is either one node function for all dimensions or a list
+    with one node function per dimension.
+    """
     if isinstance(knots_func_1d, (list, tuple)):
         if len(knots_func_1d) != N:
             raise ValueError("knots_func_1d list length must match N.")
-        knots_per_dim = [
-            knots_func_1d[i](int(m[i]), float(domains[i][0]), float(domains[i][1])) for i in range(N)
-        ]
+        functions = list(knots_func_1d)
     else:
-        knots_per_dim = [
-            knots_func_1d(int(m[i]), float(domains[i][0]), float(domains[i][1])) for i in range(N)
-        ]
+        functions = [knots_func_1d] * N
+
+    # One-dimensional nodes: m[i] nodes on the interval of dimension i.
+    knots_per_dim = []
+    for i in range(N):
+        knots_per_dim.append(functions[i](int(m[i]), float(domains[i][0]), float(domains[i][1])))
 
     grids = np.meshgrid(*knots_per_dim, indexing="ij")
-    points = np.vstack([grid.ravel() for grid in grids])
+    # One column per tensor-grid node, one row per dimension.
+    rows = []
+    for grid in grids:
+        rows.append(grid.ravel())
+    points = np.vstack(rows)
     return {"knots": points, "size": points.shape[1], "knots_per_dim": knots_per_dim, "m": np.array(m, dtype=int)}
 
 
@@ -285,16 +254,10 @@ def generate_multi_indices_total_degree(N, level):
     return np.asarray(degrees, dtype=int) + 1
 
 
-def create_sparse_grid_structure(
-    N: int,
-    level: int,
-    level_to_knots_func: Callable[[int], int],
-    knots_func_1d: Union[Callable[[int, float, float], np.ndarray], Sequence[Callable[[int, float, float], np.ndarray]]],
-    domains: Sequence[Tuple[float, float]],
-) -> List[Dict[str, object]]:
+def create_sparse_grid_structure(N, level, level_to_knots_func, knots_func_1d, domains):
     """Create a sparse-grid structure (tensor grids plus combination coefficients)."""
     multi_indices = generate_multi_indices_total_degree(N, level)
-    S: List[Dict[str, object]] = []
+    S = []
 
     for idx_vec in multi_indices:
         q = int(np.sum(idx_vec))
@@ -302,7 +265,11 @@ def create_sparse_grid_structure(
         if abs(coeff) < 1e-12:
             continue
 
-        m = np.array([int(level_to_knots_func(int(val))) for val in idx_vec], dtype=int)
+        # Number of one-dimensional nodes for each level in the multi-index.
+        m = []
+        for val in idx_vec:
+            m.append(int(level_to_knots_func(int(val))))
+        m = np.array(m, dtype=int)
         grid = tensor_grid_knots(N, m, knots_func_1d, domains)
         grid["coeff"] = float(coeff)
         grid["idx"] = np.array(idx_vec, dtype=int)
@@ -311,12 +278,16 @@ def create_sparse_grid_structure(
     return S
 
 
-def reduce_sparse_grid_knots(S: List[Dict[str, object]], tol: float = 1e-14) -> np.ndarray:
+def reduce_sparse_grid_knots(S, tol=1e-14):
     """Extract and uniquify nodes from all tensor grids in S."""
     if not S:
         return np.array([[]], dtype=float)
 
-    all_knots = np.hstack([grid["knots"] for grid in S]).T
+    # Stack the nodes of every tensor grid: one row per node.
+    knots_list = []
+    for grid in S:
+        knots_list.append(grid["knots"])
+    all_knots = np.hstack(knots_list).T
     if all_knots.shape[0] == 0:
         return np.array([[]], dtype=float)
 
@@ -383,29 +354,6 @@ def _barycentric_weights_for_knots(knots_1d):
         return _clenshaw_curtis_barycentric_weights(knots.size)
     return _generic_barycentric_weights(tuple(knots))
 
-
-def _evaluate_lagrange_poly_1d(x_eval, knots_1d, j_index):
-    """Evaluate one cardinal basis function with the barycentric formula.
-
-    CC uses closed-form weights; Leja uses weights from its actual nodes.
-    At a node, return the cardinal value directly to avoid a removable 0/0.
-    """
-    knots_1d = np.asarray(knots_1d, dtype=float)
-    num_knots = knots_1d.size
-    if not 0 <= j_index < num_knots:
-        raise IndexError("j_index is outside the knot array")
-    if num_knots == 1:
-        return 1.0
-
-    differences = float(x_eval) - knots_1d
-    scale = max(1.0, float(np.max(np.abs(knots_1d))))
-    matches = np.flatnonzero(np.abs(differences) <= 1e-14 * scale)
-    if matches.size:
-        return 1.0 if j_index == int(matches[0]) else 0.0
-
-    weights = _barycentric_weights_for_knots(knots_1d)
-    terms = weights / differences
-    return float(terms[j_index] / np.sum(terms))
 
 def _evaluate_lagrange_basis_matrix_1d(points_1d, knots_1d):
     """Evaluate all one-dimensional cardinal functions at many points.
@@ -698,25 +646,24 @@ def select_refinement_points(indicators, nominal_budget, include_ties=True, tie_
     else:
         # A threshold cutoff is tau*max(eta), not the last retained value.
         cutoff = float(indicator_cutoff)
-    tolerance = tie_tolerance * abs(cutoff) if include_ties else 0.0
+    tolerance = 0.0
+    if include_ties:
+        tolerance = tie_tolerance * abs(cutoff)
     return ranking[indicators[ranking] >= cutoff - tolerance]
 
 
 # =============================================================================
-# Convenience: build per-dimension Leja knots + domains + suggested lev2knots
+# Convenience: build per-dimension Leja knots + domains
 # =============================================================================
 
-def build_1d_knots_and_domains_from_pdfspecs(
-    pdf_specs: Sequence[PdfSpec],
-    grid_size: int = 2001,
-) -> Tuple[List[Callable[[int, float, float], np.ndarray]], List[Tuple[float, float]]]:
+def build_1d_knots_and_domains_from_pdfspecs(pdf_specs, grid_size=2001):
     """
     Given one PdfSpec per dimension, return:
       - knots_funcs: list of weighted-Leja generators, one per dimension
       - domains: list of [a,b] per dimension (after truncation if needed)
     """
-    knots_funcs: List[Callable[[int, float, float], np.ndarray]] = []
-    domains: List[Tuple[float, float]] = []
+    knots_funcs = []
+    domains = []
 
     for spec in pdf_specs:
         kf, dom = make_knots_func_from_pdfspec(spec, grid_size=grid_size)
@@ -726,33 +673,11 @@ def build_1d_knots_and_domains_from_pdfspecs(
     return knots_funcs, domains
 
 
-def suggest_global_lev2knots_for_pdfspecs(
-    knots_family: str,
-    pdf_specs: Sequence[PdfSpec],
-) -> Callable[[int], int]:
-    """
-    Return a single lev2knots function to be used globally.
-    If any dimension requests symmetric Leja, prefer 2-step for Leja family.
-    """
-    if knots_family.lower().strip() in {"leja", "weighted-leja", "wleja"}:
-        if any(bool(s.symmetric) for s in pdf_specs):
-            return lev2knots_2step
-        return lev2knots_lin
-
-    return suggest_lev2knots_for_nestedness(knots_family, None)
-
-
 # =============================================================================
 # Sparse-grid quadrature weights (weighted integrals)
 # =============================================================================
 
-def _lagrange_quadrature_weights_1d(
-    knots: np.ndarray,
-    rho: Callable[[np.ndarray], np.ndarray],
-    a: float,
-    b: float,
-    quad_order: int = 200,
-) -> np.ndarray:
+def _lagrange_quadrature_weights_1d(knots, rho, a, b, quad_order=200):
     """
     Compute 1D quadrature weights by integrating Lagrange basis polynomials
     against the PDF rho on [a, b] using Gauss-Legendre quadrature.
@@ -776,15 +701,8 @@ def _lagrange_quadrature_weights_1d(
 
 
 def compute_sparse_grid_quadrature_weights(
-    S: List[Dict[str, object]],
-    unique_knots: np.ndarray,
-    pdf_funcs: Sequence[Callable[[np.ndarray], np.ndarray]],
-    domains: Sequence[Tuple[float, float]],
-    quad_order: int = 200,
-    tol: float = 1e-12,
-    pdf_keys: Optional[Sequence[str]] = None,
-    normalize: bool = True,
-) -> np.ndarray:
+    S, unique_knots, pdf_funcs, domains, quad_order=200, tol=1e-12, pdf_keys=None, normalize=True,
+):
     """
     Compute sparse-grid quadrature weights on the union of knots.
 
@@ -798,15 +716,20 @@ def compute_sparse_grid_quadrature_weights(
         raise ValueError("pdf_funcs length must match domains length.")
 
     if pdf_keys is None:
-        pdf_keys = [str(i) for i in range(len(pdf_funcs))]
+        pdf_keys = []
+        for i in range(len(pdf_funcs)):
+            pdf_keys.append(str(i))
 
-    unique_keys = [tuple(np.round(k, 12)) for k in unique_knots.T]
-    index_map = {k: i for i, k in enumerate(unique_keys)}
+    # Lookup from rounded node coordinates to the column in unique_knots.
+    index_map = {}
+    for i, node in enumerate(unique_knots.T):
+        index_map[tuple(np.round(node, 12))] = i
     weights = np.zeros(unique_knots.shape[1], dtype=float)
 
-    cache: Dict[Tuple[object, ...], np.ndarray] = {}
+    # One-dimensional weights already computed, keyed by nodes, PDF and interval.
+    cache = {}
     for grid in S:
-        weights_1d: List[np.ndarray] = []
+        weights_1d = []
         for dim, knots_1d in enumerate(grid["knots_per_dim"]):
             key = (
                 dim,
@@ -833,7 +756,9 @@ def compute_sparse_grid_quadrature_weights(
             node = grid["knots"][:, j]
             idx = index_map.get(tuple(np.round(node, 12)))
             if idx is None:
-                continue
+                # Skipping a node would silently lose part of the quadrature
+                # rule, so the weights would no longer integrate correctly.
+                raise ValueError(f"Quadrature node {node} is missing from unique_knots.")
             weights[idx] += float(grid["coeff"]) * w_tensor[j]
 
     if normalize:

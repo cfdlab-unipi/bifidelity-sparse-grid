@@ -6,7 +6,6 @@ retained for compatibility; weighted statistics use the configured PDFs.
 
 import csv
 from importlib.resources import files
-from typing import Callable, List
 
 import numpy as np
 
@@ -19,7 +18,7 @@ SYMMETRIC_LEJA_NODES = np.array([float(row["symmetric_node"]) for row in LEJA_RO
 MAX_LEJA_NODES = len(LEJA_ROWS)
 
 
-def knots_cc_1d(nn: int, x_a: float, x_b: float) -> np.ndarray:
+def knots_cc_1d(nn, x_a, x_b):
     """Generate nn Clenshaw-Curtis nodes in [x_a, x_b]."""
     nn = int(nn)
     if nn <= 0:
@@ -70,14 +69,22 @@ def knots_leja_sym_line_1d(num_knots, x_a, x_b):
     return _leja_nodes(num_knots, x_a, x_b, "symmetric")
 
 
-def _weighted_leja_1d(
-    nn: int,
-    x_a: float,
-    x_b: float,
-    rho: Callable[[np.ndarray], np.ndarray],
-    grid_size: int = 2001,
-    symmetric: bool = False,
-) -> np.ndarray:
+def _leja_score(grid, rho_vals, nodes):
+    """Weighted Leja score on the candidate grid, for the nodes chosen so far.
+
+    score(t) = 0.5*log(rho(t)) + sum_k log(|t - x_k|)
+
+    The tiny 1e-300 avoids log(0) at nodes already chosen: their score becomes
+    about -690, so they are never selected again.
+    """
+    log_distances = np.zeros_like(grid)
+    if nodes:
+        distances = np.abs(grid[:, None] - np.array(nodes)[None, :])
+        log_distances = np.sum(np.log(distances + 1e-300), axis=1)
+    return 0.5 * np.log(rho_vals) + log_distances
+
+
+def _weighted_leja_1d(nn, x_a, x_b, rho, grid_size=2001, symmetric=False):
     """
     Weighted Leja sequence on [x_a, x_b] using a dense candidate grid (brute force).
 
@@ -85,7 +92,7 @@ def _weighted_leja_1d(
         t^(j) = argmax_{t in [x_a,x_b]}  sqrt(rho(t)) * Π_{k<j} |t - t^(k)|
 
     Nested by construction (return first nn nodes).
-    If symmetric=True, enforce symmetry about mid-point by selecting one side and mirroring.
+    If symmetric=True, start from the mid-point and add mirrored pairs.
     (Useful for symmetric pdfs like normal and beta with alpha=beta).
     """
     nn = int(nn)
@@ -102,45 +109,34 @@ def _weighted_leja_1d(
 
     mid = 0.5 * (x_a + x_b)
 
-    def score_with_nodes(nodes: List[float]) -> np.ndarray:
-        # score(t) = 0.5*log(rho(t)) + sum_k log(|t-x_k|)
-        d = np.zeros_like(grid)
-        if nodes:
-            # accumulate log distances in a stable way
-            d = np.sum(np.log(np.abs(grid[:, None] - np.array(nodes)[None, :]) + 1e-300), axis=1)
-        return 0.5 * np.log(rho_vals) + d
-
-    # --- initialization: start from mode (max rho) ---
-    nodes: List[float] = []
-    idx0 = int(np.argmax(rho_vals))
-    x0 = float(grid[idx0])
-    nodes.append(x0)
-
     if not symmetric:
+        # Start from the mode (largest density on the grid), then add one
+        # node at a time where the score is largest.
+        nodes = [float(grid[int(np.argmax(rho_vals))])]
         while len(nodes) < nn:
-            sc = score_with_nodes(nodes)
-            nodes.append(float(grid[int(np.argmax(sc))]))
+            score = _leja_score(grid, rho_vals, nodes)
+            nodes.append(float(grid[int(np.argmax(score))]))
         return np.array(nodes, dtype=float)
 
     # symmetric construction:
-    # keep nodes symmetric around mid. Start from the mode; then add pairs (x, 2mid-x)
-    # If the mode is not exactly mid, the first node will be mirrored only when we add the first pair.
-    sym_nodes: List[float] = [x0]
-
-    # if the first node isn't at mid, ensure its mirror appears early
-    if abs(x0 - mid) > 1e-14 and len(sym_nodes) < nn:
-        sym_nodes.append(float(2.0 * mid - x0))
+    # keep nodes symmetric around mid. Start exactly from mid, then add pairs
+    # (x, 2mid-x). The midpoint is the mode of every supported symmetric PDF
+    # (normal with mu at the centre, beta with alpha == beta > 0). Starting from
+    # the grid argmax instead can give a first node a few ulps away from mid;
+    # its mirror is then a near-duplicate node. For a flat density (beta with
+    # alpha == beta == 0) the argmax is the left endpoint, and the midpoint was
+    # later added twice. Both cases made the interpolation singular.
+    sym_nodes = [float(mid)]
 
     while len(sym_nodes) < nn:
-        sc = score_with_nodes(sym_nodes)
-        x_new = float(grid[int(np.argmax(sc))])
+        score = _leja_score(grid, rho_vals, sym_nodes)
+        x_new = float(grid[int(np.argmax(score))])
         x_mir = float(2.0 * mid - x_new)
 
         # add x_new
-        if len(sym_nodes) < nn:
-            sym_nodes.append(x_new)
-        # add mirror
+        sym_nodes.append(x_new)
+        # add its mirror, unless nn nodes are already present
         if len(sym_nodes) < nn:
             sym_nodes.append(x_mir)
 
-    return np.array(sym_nodes[:nn], dtype=float)
+    return np.array(sym_nodes, dtype=float)

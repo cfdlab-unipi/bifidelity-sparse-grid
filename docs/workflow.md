@@ -85,8 +85,10 @@ sparse-grid --phase 3
 The refined model uses measured values at supplied target nodes and baseline
 predictions at unmeasured target nodes. Baseline values take priority if a
 point appears in both input files. Points outside the target grid are not used.
-Coordinates are matched using 12 decimal places, with a nearest-node fallback
-of `1e-10` in physical input coordinates.
+Coordinates read from the files are replaced by the exact generated grid nodes
+when every coordinate lies within `1e-6` of its domain width. Every baseline
+node must be present exactly once; Phase 2 rows away from the target grid are
+reported and ignored.
 
 Keep the selection CSV produced by Phase 2. When it exists, Phase 3 checks
 that all automatically selected evaluations have been supplied. Without this

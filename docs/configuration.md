@@ -230,7 +230,9 @@ For an aggregate vector metric:
 
 Omitting `metric` means component-wise exceedance. Values are estimated from
 the informed model at target nodes using sparse-grid quadrature weights.
-These weights can be negative: nonlinear moments, quantiles, and probabilities
-are numerical estimates and require convergence checks. They are not a
-replacement for independent validation. Coefficient files are in `polynomials/`;
-weighted summaries are in `statistics/`.
+These weights can be negative. Moments are then still quadrature estimates
+and require convergence checks; a negative variance estimate is reported as
+NaN standard deviation. Quantiles and exceedance probabilities need a
+probability distribution, so they are written as NaN, with a warning, when any
+weight is negative. They are not a replacement for independent validation.
+Coefficient files are in `polynomials/`; weighted summaries are in `statistics/`.

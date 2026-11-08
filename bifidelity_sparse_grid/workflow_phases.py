@@ -20,8 +20,9 @@ import io
 import re
 import numpy as np
 import pandas as pd
+from scipy.spatial import cKDTree
 
-# --- Import from your custom toolboxes ---
+# --- Numerical and plotting tools of this package ---
 from .sparse_grid_toolbox import (
     PdfSpec,
     create_sparse_grid_structure, reduce_sparse_grid_knots,
@@ -44,12 +45,18 @@ from .plotting_tools import (
 
 ROUND_DECIMALS = 12  # for deterministic point keys (set operations, dedupe)
 DEFAULT_TOL = 1e-10   # matching tolerance in physical space (snap-to-grid)
+# Coordinates read from text files are replaced by the exact generated grid
+# nodes when every coordinate lies within this fraction of its domain width.
+# Text round trips can change the last binary digit of a coordinate; for
+# inputs of order 1e4 or larger, 12-decimal keys cannot absorb that change.
+# Distinct sparse-grid nodes are much farther apart than this tolerance.
+SNAP_RELATIVE_TOL = 1e-6
 
 # =============================================================================
 # QoI helpers (scalar + vector support)
 # =============================================================================
 
-def _expand_qoi_specs(p_def: dict) -> list:
+def _expand_qoi_specs(p_def):
     """
     Expand output_quantities into a list of specs with resolved column names.
     Supports:
@@ -87,10 +94,14 @@ def _expand_qoi_specs(p_def: dict) -> list:
         raise ValueError(f"Invalid output_quantities entry: {item}")
     return specs
 
-def _qoi_columns_from_specs(qoi_specs: list) -> list:
-    return [c for spec in qoi_specs for c in spec["columns"]]
+def _qoi_columns_from_specs(qoi_specs):
+    """All output column names, in configuration order."""
+    columns = []
+    for spec in qoi_specs:
+        columns.extend(spec["columns"])
+    return columns
 
-def _describe_qois_for_msg(qoi_specs: list) -> str:
+def _describe_qois_for_msg(qoi_specs):
     parts = []
     for spec in qoi_specs:
         if spec["is_vector"]:
@@ -99,38 +110,40 @@ def _describe_qois_for_msg(qoi_specs: list) -> str:
             parts.append(spec["name"])
     return ", ".join(parts)
 
-def _resolve_plot_columns(plot_cfg: dict, qoi_specs: list) -> list:
+def _resolve_plot_columns(plot_cfg, qoi_specs):
     """
     Decide which QoI columns to plot.
     Default: all scalar quantities + vector quantities limited to plot_indices (if provided).
     If plot_cfg["plot_quantities"] is provided, only those are used.
     """
-    name_to_spec = {s["name"]: s for s in qoi_specs}
+    name_to_spec = {}
+    for spec in qoi_specs:
+        name_to_spec[spec["name"]] = spec
     requested = plot_cfg.get("plot_quantities")
+
+    # Collect the specs to plot. An explicit component column is added directly.
     cols = []
-
-    def _add_from_spec(spec):
-        if not spec["is_vector"]:
-            cols.extend(spec["columns"])
-        else:
-            if spec["plot_indices"]:
-                for i in spec["plot_indices"]:
-                    if 0 <= int(i) < spec["size"]:
-                        cols.append(spec["columns"][int(i)])
-
+    specs_to_plot = []
     if requested:
         for name in requested:
             spec = name_to_spec.get(name)
-            if spec is None:
-                if name in _qoi_columns_from_specs(qoi_specs):
-                    cols.append(name)
-                else:
-                    raise ValueError(f"plot_quantities contains unknown QoI '{name}'.")
+            if spec is not None:
+                specs_to_plot.append(spec)
+            elif name in _qoi_columns_from_specs(qoi_specs):
+                specs_to_plot.append({"is_vector": False, "columns": [name]})
             else:
-                _add_from_spec(spec)
+                raise ValueError(f"plot_quantities contains unknown QoI '{name}'.")
     else:
-        for spec in qoi_specs:
-            _add_from_spec(spec)
+        specs_to_plot = qoi_specs
+
+    # A scalar gives its column; a vector gives only its plot_indices components.
+    for spec in specs_to_plot:
+        if not spec["is_vector"]:
+            cols.extend(spec["columns"])
+        else:
+            for i in spec["plot_indices"]:
+                if 0 <= int(i) < spec["size"]:
+                    cols.append(spec["columns"][int(i)])
 
     seen = set()
     ordered = []
@@ -140,7 +153,7 @@ def _resolve_plot_columns(plot_cfg: dict, qoi_specs: list) -> list:
             seen.add(c)
     return ordered
 
-def _refinement_values_from_qoi(df: pd.DataFrame, ref_name: str, qoi_specs: list) -> np.ndarray:
+def _refinement_values_from_qoi(df, ref_name, qoi_specs):
     """
     Return scalar values or component rows for the refinement criterion.
     - If ref_name is a scalar QoI column -> use it directly.
@@ -149,18 +162,17 @@ def _refinement_values_from_qoi(df: pd.DataFrame, ref_name: str, qoi_specs: list
     if ref_name in df.columns:
         return df[ref_name].values.astype(float)
 
-    name_to_spec = {s["name"]: s for s in qoi_specs}
-    spec = name_to_spec.get(ref_name)
-    if spec and spec["is_vector"]:
-        vals = df[spec["columns"]].values.astype(float)
-        return vals.T
+    for spec in qoi_specs:
+        if spec["name"] == ref_name and spec["is_vector"]:
+            vals = df[spec["columns"]].values.astype(float)
+            return vals.T
 
     raise ValueError(
         f"Unknown refinement_criterion '{ref_name}'. "
         f"Expected a scalar QoI column or a vector QoI name."
     )
 
-def _parse_pdf_specs(p_def: dict) -> list:
+def _parse_pdf_specs(p_def):
     """
     Build PdfSpec list from config.
     If pdfs is omitted, defaults to uniform per dimension.
@@ -193,13 +205,16 @@ def _parse_pdf_specs(p_def: dict) -> list:
         a, b = domains[i][0], domains[i][1]
 
         # Provide domain bounds when not explicitly included in params.
-        if pdf_type in ("uniform", "beta", "triangular"):
-            params.setdefault("a", a)
-            params.setdefault("b", b)
-        else:
-            # For unbounded PDFs, use config domains as explicit truncation when provided.
-            params.setdefault("a", a)
-            params.setdefault("b", b)
+        # For unbounded PDFs these bounds are the truncation interval.
+        params.setdefault("a", a)
+        params.setdefault("b", b)
+
+        # Exponential and gamma densities are zero for x < 0: an interval
+        # entirely on the negative axis would have no probability at all.
+        if pdf_type in ("exponential", "gamma") and float(params["b"]) <= 0.0:
+            raise ValueError(
+                f"{pdf_type} PDF needs an interval overlapping x > 0 (dim '{dim_names[i]}')."
+            )
 
         # Basic parameter validation
         if pdf_type == "normal":
@@ -246,16 +261,21 @@ def _parse_pdf_specs(p_def: dict) -> list:
 
     return specs
 
-def _choose_level_to_knots(pdf_specs: list) -> callable:
+def _choose_level_to_knots(pdf_specs):
     """
     Select a global level->knots function.
     - If any dimension is uniform (Clenshaw-Curtis), use doubling for nestedness.
     - Else, if any symmetric Leja is requested, use 2-step (odd counts).
     - Otherwise, linear is fine for Leja.
     """
-    if any(s.name.lower() == "uniform" for s in pdf_specs):
+    names = []
+    symmetric_flags = []
+    for spec in pdf_specs:
+        names.append(spec.name.lower())
+        symmetric_flags.append(bool(spec.symmetric))
+    if "uniform" in names:
         return lev2knots_doubling
-    if any(bool(s.symmetric) for s in pdf_specs):
+    if True in symmetric_flags:
         return lev2knots_2step
     return lev2knots_lin
 
@@ -297,7 +317,7 @@ def _grid_settings(p_def, sg_settings):
     return pdf_specs, knots_funcs, domains, level_to_knots
 
 
-def _build_pdf_functions(pdf_specs: list):
+def _build_pdf_functions(pdf_specs):
     """
     Build per-dimension PDF callables for weighted integration.
     Returns (pdf_funcs, pdf_keys, domains).
@@ -314,12 +334,44 @@ def _build_pdf_functions(pdf_specs: list):
 
     return funcs, keys, domains
 
+def _has_negative_weights(weights):
+    """True if a quadrature rule contains clearly negative weights.
+
+    Smolyak combination weights are often negative in two or more dimensions.
+    They then do not define a probability distribution: their cumulative sum
+    is not monotone and can leave the interval [0, 1]. Values below a tiny
+    fraction of the largest weight are treated as rounding noise.
+    """
+    weights = np.asarray(weights, dtype=float)
+    if weights.size == 0:
+        return False
+    return bool(np.any(weights < -1e-12 * np.max(np.abs(weights))))
+
+def _exceedance_probability(values, weights, threshold):
+    """P(value > threshold) from quadrature weights, or NaN if not meaningful.
+
+    With negative weights the sum can be negative or larger than one, so it is
+    not reported as a probability.
+    """
+    if _has_negative_weights(weights):
+        return np.nan
+    values = np.asarray(values, dtype=float)
+    weights = np.asarray(weights, dtype=float)
+    return float(np.sum(weights[values > threshold]))
+
 def _weighted_quantile(values, weights, quantiles):
-    """Compute weighted quantiles for 1D values."""
+    """Compute weighted quantiles for 1D values.
+
+    Returns NaN when the weights contain negative values: the cumulative
+    weight is then not a distribution function and np.interp, which needs an
+    increasing abscissa, would return meaningless numbers.
+    """
     values = np.asarray(values, dtype=float)
     weights = np.asarray(weights, dtype=float)
     if values.size == 0:
         return np.array([])
+    if _has_negative_weights(weights):
+        return np.full(len(quantiles), np.nan)
     idx = np.argsort(values)
     v = values[idx]
     w = weights[idx]
@@ -342,7 +394,12 @@ def _weighted_stats(values, weights, quantiles):
     mean = np.sum(w * values)
     diff = values - mean
     var = np.sum(w * diff ** 2)
-    std = np.sqrt(var)
+    # With negative quadrature weights the estimated variance can itself be
+    # negative; then no standard deviation or higher moment is reported.
+    if var < 0:
+        std = np.nan
+    else:
+        std = np.sqrt(var)
     if std > 0:
         skew = np.sum(w * diff ** 3) / (std ** 3)
         kurt = np.sum(w * diff ** 4) / (std ** 4) - 3.0
@@ -359,7 +416,23 @@ def _weighted_stats(values, weights, quantiles):
         "quantiles": qs,
     }
 
-def _infer_vector_label(component_name: str) -> str:
+def _statistics_row(first_columns, values, weights, quantiles, thresholds):
+    """
+    One row of a statistics table: the identifying columns, the weighted
+    moments, the requested quantiles, and P(value > threshold) for each
+    threshold. Columns keep this order in the CSV files.
+    """
+    stats = _weighted_stats(values, weights, quantiles)
+    row = dict(first_columns)
+    for key in ["mean", "var", "std", "skew", "kurtosis_excess"]:
+        row[key] = stats.get(key)
+    for qv, qn in zip(stats.get("quantiles", []), quantiles):
+        row[f"q{qn:.3f}"] = qv
+    for thr in thresholds:
+        row[f"P_gt_{thr}"] = _exceedance_probability(values, weights, thr)
+    return row
+
+def _infer_vector_label(component_name):
     """
     Extract a label from a component name like 'qoi_t0003' -> 't'.
     Returns empty string if not found.
@@ -384,19 +457,29 @@ def _dump_lagrange_coefficients(model, S, dim_names, level_label, qty, output_di
     """
     unique_knots = model["unique_knots"]
     f_values = model["f_on_unique_knots"]
-    f_map = {tuple(np.round(k, 12)): float(v) for k, v in zip(unique_knots.T, f_values)}
+    # Lookup from rounded node coordinates to the nodal value.
+    f_map = {}
+    for node, value in zip(unique_knots.T, f_values):
+        f_map[tuple(np.round(node, 12))] = float(value)
 
     rows = []
     for grid in S:
         grid_coeff = float(grid.get("coeff", 0.0))
         idx_vec = grid.get("idx")
-        idx_str = ",".join(str(int(x)) for x in idx_vec) if idx_vec is not None else ""
+        # Multi-index written as text, e.g. "1,2,1".
+        idx_str = ""
+        if idx_vec is not None:
+            idx_parts = []
+            for x in idx_vec:
+                idx_parts.append(str(int(x)))
+            idx_str = ",".join(idx_parts)
 
         for j in range(int(grid["size"])):
             node = grid["knots"][:, j]
             node_key = tuple(np.round(node, 12))
             f_val = f_map.get(node_key, np.nan)
-            combined = grid_coeff * f_val if not np.isnan(f_val) else np.nan
+            # NaN times a number is NaN, so a missing value stays missing.
+            combined = grid_coeff * f_val
 
             row = {
                 "grid_idx": idx_str,
@@ -421,12 +504,12 @@ def _dump_lagrange_coefficients(model, S, dim_names, level_label, qty, output_di
 # Robust I/O + data hygiene
 # =============================================================================
 
-def _normalize_header_tokens(line: str) -> str:
+def _normalize_header_tokens(line):
     """Normalize a header line by collapsing whitespace and joining with tabs."""
     tokens = re.split(r"\s+", line.strip())
     return "\t".join(tokens)
 
-def _read_to_fill_file(path: str, expected_columns: list, sep_regex: str = r"\s+") -> pd.DataFrame:
+def _read_to_fill_file(path, expected_columns, sep_regex=r"\s+"):
     """
     Robust reader for *_to_fill.dat files that may contain:
       - tabs OR spaces as separators
@@ -472,7 +555,10 @@ def _read_to_fill_file(path: str, expected_columns: list, sep_regex: str = r"\s+
     header_norm = norm_lines[header_idx]
     header_tokens = header_norm.split("\t")
 
-    missing = [c for c in expected_columns if c not in header_tokens]
+    missing = []
+    for c in expected_columns:
+        if c not in header_tokens:
+            missing.append(c)
     if missing:
         raise ValueError(
             f"File '{path}': header missing columns {missing}. Found columns: {header_tokens}"
@@ -496,30 +582,34 @@ def _read_to_fill_file(path: str, expected_columns: list, sep_regex: str = r"\s+
 
     return df
 
-def _filter_fully_filled_rows(df: pd.DataFrame, dim_names: list, qoi_columns: list) -> pd.DataFrame:
+def _filter_fully_filled_rows(df, dim_names, qoi_columns):
     """Keep only rows where all dimensions and all QoI columns are present (not NaN)."""
     required = dim_names + qoi_columns
     mask = ~df[required].isnull().any(axis=1)
     return df.loc[mask].copy()
 
-def _deduplicate_by_point(df: pd.DataFrame, dim_names: list, keep: str = "first") -> pd.DataFrame:
+def _deduplicate_by_point(df, dim_names):
     """
     Deduplicate rows by a rounded coordinate key (ROUND_DECIMALS).
-    Default keep='first' makes baseline win when df = concat([base, ref]).
+    The first occurrence is kept, so the baseline wins when
+    df = concat([base, ref]).
     """
-    df2 = df.copy()
-    df2["_pt_key"] = df2[dim_names].apply(
-        lambda r: tuple(np.round(r.values.astype(float), ROUND_DECIMALS)),
-        axis=1
-    )
-    df2 = df2.drop_duplicates(subset=["_pt_key"], keep=keep).drop(columns=["_pt_key"])
-    return df2
+    seen_keys = set()
+    keep_row = []
+    for point in df[dim_names].values.astype(float):
+        key = tuple(np.round(point, ROUND_DECIMALS))
+        keep_row.append(key not in seen_keys)
+        seen_keys.add(key)
+    return df.loc[np.array(keep_row, dtype=bool)].copy()
 
-def _point_key_array(knots_T: np.ndarray) -> set:
+def _point_key_array(knots_T):
     """knots_T shape: (npts, ndim) -> set of rounded tuple keys."""
-    return set(map(tuple, np.round(knots_T.astype(float), ROUND_DECIMALS)))
+    keys = set()
+    for point in np.asarray(knots_T, dtype=float):
+        keys.add(tuple(np.round(point, ROUND_DECIMALS)))
+    return keys
 
-def _require_filled_file(path_filled: str, path_template: str) -> str:
+def _require_filled_file(path_filled, path_template):
     """
     Enforce the "copy then fill" workflow.
     Users must copy *_to_fill.dat to a new file without the suffix and fill that file.
@@ -537,11 +627,66 @@ def _require_filled_file(path_filled: str, path_template: str) -> str:
         f"Expected template: '{path_template}'."
     )
 
+def _snap_points_to_grid(points, grid_nodes, domains, relative_tolerance=SNAP_RELATIVE_TOL):
+    """
+    Replace coordinates read from a file with the exact generated grid nodes.
+
+    points:     (n_points, N) coordinates read from a text file
+    grid_nodes: (N, n_nodes) nodes generated by the sparse-grid construction
+    domains:    one (min, max) interval per dimension
+
+    A point is matched when its largest coordinate difference from a node,
+    measured as a fraction of each domain width, is at most relative_tolerance.
+    Returns (snapped_points, matched), where matched is a boolean mask.
+    Unmatched points keep their original coordinates.
+    """
+    points = np.array(points, dtype=float).reshape(-1, len(domains))
+    matched = np.zeros(points.shape[0], dtype=bool)
+    if points.shape[0] == 0 or grid_nodes.shape[1] == 0:
+        return points, matched
+
+    # Scale every dimension to [0, 1], so one tolerance fits all physical units.
+    lower = np.array([d[0] for d in domains], dtype=float)
+    width = np.array([d[1] - d[0] for d in domains], dtype=float)
+    scaled_nodes = (grid_nodes.T - lower) / width
+    scaled_points = (points - lower) / width
+
+    # Nearest node in the maximum norm (p=inf): every coordinate must be close.
+    distance, nearest = cKDTree(scaled_nodes).query(scaled_points, k=1, p=np.inf)
+    matched = distance <= relative_tolerance
+    points[matched] = grid_nodes.T[nearest[matched]]
+    return points, matched
+
+def _snap_baseline_rows(df_base, dim_names, grid_nodes, domains, path):
+    """
+    Put the exact baseline-grid coordinates into the baseline table.
+
+    Every row must correspond to one baseline node and every baseline node must
+    be present exactly once, because the baseline interpolant needs all of them.
+    """
+    snapped, matched = _snap_points_to_grid(df_base[dim_names].values, grid_nodes, domains)
+    if not np.all(matched):
+        first_rows = df_base.loc[~matched, dim_names].head(3).values.tolist()
+        raise ValueError(
+            f"File '{path}': {int(np.sum(~matched))} rows are not on the baseline grid "
+            f"(for example {first_rows}). Keep the coordinates of the generated template."
+        )
+    present = _point_key_array(snapped)
+    if len(present) != len(snapped):
+        raise ValueError(f"File '{path}': some baseline points appear more than once.")
+    if len(present) != grid_nodes.shape[1]:
+        raise ValueError(
+            f"File '{path}': {grid_nodes.shape[1] - len(present)} baseline grid points are missing."
+        )
+    df_base = df_base.copy()
+    df_base[dim_names] = snapped
+    return df_base
+
 # =============================================================================
 # Workflow helpers
 # =============================================================================
 
-def _find_elbow_point(sorted_values: np.ndarray) -> int:
+def _find_elbow_point(sorted_values):
     """Find the elbow point in a descending-sorted array."""
     if len(sorted_values) < 3:
         return len(sorted_values)
@@ -557,34 +702,26 @@ def _find_elbow_point(sorted_values: np.ndarray) -> int:
     return int(np.argmax(distances) + 1)
 
 def _build_informed_model_values(
-    base_knots: np.ndarray,
-    base_values: np.ndarray,
-    all_target_knots: np.ndarray,
-    all_known_data_df: pd.DataFrame,
-    quantity_name: str,
-    dim_names: list,
+    base_knots,
+    base_values,
+    all_target_knots,
+    all_known_data_df,
+    quantity_name,
+    dim_names,
     base_grid_structure,
-    round_decimals: int = ROUND_DECIMALS,
-    nn_tolerance: float = DEFAULT_TOL,
-    warn: bool = True,
-    tolerance: float = None,   # <-- backward-compatible alias
-) -> np.ndarray:
+    nn_tolerance=DEFAULT_TOL,
+):
     """
     Build nodal values on the TARGET grid:
       1) exact match by rounded key (stable, no tolerance dependence)
-      2) fallback: nearest-neighbor snap within nn_tolerance
+      2) fallback: nearest-neighbor snap within nn_tolerance (physical units)
       3) remaining nodes are interpolated from the BASE model
-
-    Backward compatibility:
-      - if caller passes `tolerance=...`, it overrides nn_tolerance.
     """
-
-    if tolerance is not None:
-        nn_tolerance = float(tolerance)
-
+    # Target nodes, one row per node, and a lookup from rounded key to row.
     canonical = all_target_knots.T.astype(float)  # (M, N)
-    canon_keys = [tuple(np.round(p, round_decimals)) for p in canonical]
-    canon_index = {k: i for i, k in enumerate(canon_keys)}
+    canon_index = {}
+    for i, point in enumerate(canonical):
+        canon_index[tuple(np.round(point, ROUND_DECIMALS))] = i
 
     dfk = all_known_data_df[dim_names + [quantity_name]].copy()
     dfk = dfk.dropna(axis=0, how="any")
@@ -599,7 +736,7 @@ def _build_informed_model_values(
     # 1) exact match by key
     unmatched = []
     for p, val in zip(data_points, data_values):
-        k = tuple(np.round(p, round_decimals))
+        k = tuple(np.round(p, ROUND_DECIMALS))
         idx = canon_index.get(k, None)
         if idx is None:
             unmatched.append((p, val))
@@ -620,17 +757,15 @@ def _build_informed_model_values(
                 snapped += 1
             else:
                 rejected += 1
-                if warn:
-                    print(
-                        f"[WARN] '{quantity_name}': point {p} not on target grid "
-                        f"(min_dist={np.sqrt(dist2[j]):.3e} > tol={nn_tolerance:.3e}). Ignored."
-                    )
+                print(
+                    f"[WARN] '{quantity_name}': point {p} not on target grid "
+                    f"(min_dist={np.sqrt(dist2[j]):.3e} > tol={nn_tolerance:.3e}). Ignored."
+                )
 
-        if warn:
-            print(
-                f"[INFO] '{quantity_name}': exact-matched={len(data_points)-len(unmatched)}, "
-                f"nn-snapped={snapped}, rejected={rejected}"
-            )
+        print(
+            f"[INFO] '{quantity_name}': exact-matched={len(data_points)-len(unmatched)}, "
+            f"nn-snapped={snapped}, rejected={rejected}"
+        )
 
     # 3) interpolate missing target nodes from base model
     missing = np.where(np.isnan(final_values))[0]
@@ -649,8 +784,6 @@ def _build_informed_model_values(
         # Diagnostic: values inherited from the base model
         print(f"\n[INFO] '{quantity_name}': values inherited from BASE model "
               f"({missing.size} target nodes)")
-
-
 
     return final_values
 
@@ -729,15 +862,20 @@ def run_phase_2(config):
     if df_base[qoi_columns].isnull().values.any():
         raise ValueError(f"The file '{input_path}' contains missing values. Fill all baseline rows before Phase 2.")
 
+    # Grid settings are needed first: file coordinates are matched to the grid.
+    N = len(dim_names)
+    w_start, w_target = sg_settings["base_level"], sg_settings["target_level"]
+    pdf_specs, knots_funcs, domains, level_to_knots = _grid_settings(p_def, sg_settings)
+
+    # Replace the coordinates read from the file with the exact baseline nodes.
+    S_start = create_sparse_grid_structure(N, w_start, level_to_knots, knots_funcs, domains)
+    df_base = _snap_baseline_rows(df_base, dim_names, reduce_sparse_grid_knots(S_start), domains, input_path)
+
     knots_base = df_base[dim_names].values.T
     ref_criterion_name = ref_settings["refinement_criterion"]
     values_base_criterion = _refinement_values_from_qoi(df_base, ref_criterion_name, qoi_specs)
 
     # Candidate points = target grid minus base grid
-    N = len(dim_names)
-    w_start, w_target = sg_settings["base_level"], sg_settings["target_level"]
-    pdf_specs, knots_funcs, domains, level_to_knots = _grid_settings(p_def, sg_settings)
-
     S_target = create_sparse_grid_structure(N, w_target, level_to_knots, knots_funcs, domains)
     knots_target_total = reduce_sparse_grid_knots(S_target)
 
@@ -748,7 +886,9 @@ def run_phase_2(config):
         if tuple(np.round(point, ROUND_DECIMALS)) not in base_set:
             candidate_indices.append(index)
     candidate_knots = knots_target_total[:, candidate_indices]
-    candidate_tuples = list(map(tuple, candidate_knots.T))
+    candidate_tuples = []
+    for point in candidate_knots.T:
+        candidate_tuples.append(tuple(point))
 
     if candidate_knots.shape[1] == 0:
         print("No new candidate points found for refinement.")
@@ -772,7 +912,12 @@ def run_phase_2(config):
     # Determine the requested number of new target evaluations.
     candidate_count = len(indicators)
     indicator_cutoff = None
-    max_budget = ref_settings.get("max_budget", candidate_count if ref_settings.get("use_auto_budget", False) else 0)
+    # Without max_budget: automatic modes are uncapped, fixed-count mode selects nothing.
+    if ref_settings.get("use_auto_budget", False):
+        default_max_budget = candidate_count
+    else:
+        default_max_budget = 0
+    max_budget = ref_settings.get("max_budget", default_max_budget)
     if not np.isfinite(max_budget) or int(max_budget) != max_budget or max_budget < 0:
         raise ValueError("max_budget must be a non-negative integer.")
     final_budget = min(int(max_budget), candidate_count)
@@ -784,7 +929,9 @@ def run_phase_2(config):
             fraction = float(ref_settings.get("auto_budget_threshold", 0.1))
             if not np.isfinite(fraction) or not 0 <= fraction <= 1:
                 raise ValueError("auto_budget_threshold must lie between zero and one.")
-            cutoff = fraction * np.max(indicators) if candidate_count else 0.0
+            cutoff = 0.0
+            if candidate_count:
+                cutoff = fraction * np.max(indicators)
             above_count = int(np.sum(indicators >= cutoff))
             if above_count <= final_budget:
                 indicator_cutoff = cutoff
@@ -809,7 +956,10 @@ def run_phase_2(config):
     )
     final_budget = len(best_local_indices)
     print(f"Nominal budget: {nominal_budget}; actual selected points: {final_budget}.")
-    selected_knots_arr = candidate_knots[:, best_local_indices] if best_local_indices.size else np.empty((N, 0), dtype=float)
+    if best_local_indices.size:
+        selected_knots_arr = candidate_knots[:, best_local_indices]
+    else:
+        selected_knots_arr = np.empty((N, 0), dtype=float)
 
     print(f"\nSelected {selected_knots_arr.shape[1]} new points for refinement.")
 
@@ -866,7 +1016,10 @@ def run_phase_2(config):
 
     # OPTIONAL points: everything in target that is not in base and not in selected
     remaining_knots = candidate_knots[:, ~selected_mask].T
-    df_remaining = pd.DataFrame(remaining_knots, columns=dim_names) if remaining_knots.size else pd.DataFrame(columns=dim_names)
+    if remaining_knots.size:
+        df_remaining = pd.DataFrame(remaining_knots, columns=dim_names)
+    else:
+        df_remaining = pd.DataFrame(columns=dim_names)
     if qoi_columns:
         df_remaining = pd.concat([df_remaining, pd.DataFrame(np.nan, index=df_remaining.index, columns=qoi_columns)], axis=1)
 
@@ -934,30 +1087,42 @@ def run_phase_3(config):
     if len(df_ref_raw) > len(df_ref):
         print(f"[INFO] Ignored {len(df_ref_raw)-len(df_ref)} Phase-2 rows with missing QoIs (optional/unfilled).")
 
-    selection_path = os.path.join(output_dir, f"{proj_name}_selection.csv")
-    if os.path.exists(selection_path):
-        selection = pd.read_csv(selection_path)
-        required_points = _point_key_array(selection.loc[selection["selected"], dim_names].values)
-        filled_points = _point_key_array(df_ref[dim_names].values)
-        if required_points - filled_points:
-            raise ValueError("Phase 3: some automatically selected refinement points are missing or unfilled.")
-
-    # Merge data; baseline wins on duplicates
-    df_all = pd.concat([df_base, df_ref], ignore_index=True)
-    df_all = _deduplicate_by_point(df_all, dim_names, keep="first")
-
-    print(f"Loaded {len(df_base)} baseline points and {len(df_ref)} refinement points (fully filled).")
-
-    # Grid structures
+    # Grid structures (needed before matching file coordinates to grid nodes)
     N = len(dim_names)
     w_start, w_target = sg_settings["base_level"], sg_settings["target_level"]
     pdf_specs, knots_funcs, domains, level_to_knots = _grid_settings(p_def, sg_settings)
 
     S_start  = create_sparse_grid_structure(N, w_start,  level_to_knots, knots_funcs, domains)
     S_target = create_sparse_grid_structure(N, w_target, level_to_knots, knots_funcs, domains)
+    knots_target_total = reduce_sparse_grid_knots(S_target)
+
+    # Replace file coordinates with the exact grid nodes. Baseline rows must
+    # cover the baseline grid. Phase-2 rows away from the target grid keep
+    # their coordinates and are reported and ignored when the model is built.
+    df_base = _snap_baseline_rows(df_base, dim_names, reduce_sparse_grid_knots(S_start), domains, path_base)
+    snapped_ref, _ = _snap_points_to_grid(df_ref[dim_names].values, knots_target_total, domains)
+    df_ref = df_ref.copy()
+    df_ref[dim_names] = snapped_ref
+
+    selection_path = os.path.join(output_dir, f"{proj_name}_selection.csv")
+    if os.path.exists(selection_path):
+        selection = pd.read_csv(selection_path)
+        # The CSV parser can also change the last binary digit: snap these too.
+        selected_points, _ = _snap_points_to_grid(
+            selection.loc[selection["selected"], dim_names].values, knots_target_total, domains
+        )
+        required_points = _point_key_array(selected_points)
+        filled_points = _point_key_array(df_ref[dim_names].values)
+        if required_points - filled_points:
+            raise ValueError("Phase 3: some automatically selected refinement points are missing or unfilled.")
+
+    # Merge data; baseline wins on duplicates
+    df_all = pd.concat([df_base, df_ref], ignore_index=True)
+    df_all = _deduplicate_by_point(df_all, dim_names)
+
+    print(f"Loaded {len(df_base)} baseline points and {len(df_ref)} refinement points (fully filled).")
 
     knots_base         = df_base[dim_names].values.T
-    knots_target_total = reduce_sparse_grid_knots(S_target)
 
     # Build models
     models = {}
@@ -974,7 +1139,6 @@ def run_phase_3(config):
             quantity_name=qty,
             dim_names=dim_names,
             base_grid_structure=S_start,
-            tolerance=DEFAULT_TOL
         )
 
         models[qty] = {
@@ -1065,11 +1229,18 @@ def run_phase_3(config):
     os.makedirs(output_dir, exist_ok=True)
 
     # Selected knots for plotting: only filled refinement rows
-    selected_knots_arr = df_ref[dim_names].values.T.astype(float) if len(df_ref) else np.empty((N, 0), dtype=float)
+    if len(df_ref):
+        selected_knots_arr = df_ref[dim_names].values.T.astype(float)
+    else:
+        selected_knots_arr = np.empty((N, 0), dtype=float)
 
     plot_columns = _resolve_plot_columns(config.get("plotting", {}), qoi_specs)
     for slice_info in config["plotting"]["slices_2d"]:
-        slice_id = "_".join([f"{k}{str(v).replace('.', 'p')}" for k, v in slice_info["fixed"].items()])
+        # File-name label of the slice, e.g. {"x3": 0.5} -> "x30p5".
+        slice_parts = []
+        for k, v in slice_info["fixed"].items():
+            slice_parts.append(f"{k}{str(v).replace('.', 'p')}")
+        slice_id = "_".join(slice_parts)
 
         for qty in plot_columns:
             plot_combined_response_surfaces(
@@ -1083,13 +1254,20 @@ def run_phase_3(config):
                 save_path=os.path.join(output_dir, f"response_surface_{qty}_{slice_id}.png")
             )
 
+        # Use the same slice as the response surfaces: inputs that are neither
+        # varying nor fixed are set to their domain midpoint (not projected).
+        fixed_for_points = dict(slice_info["fixed"])
+        for i, dim in enumerate(dim_names):
+            if dim not in slice_info["varying"] and dim not in fixed_for_points:
+                fixed_for_points[dim] = 0.5 * (domains[i][0] + domains[i][1])
+
         plot_quadrature_points_slice(
             base_knots=knots_base,
             target_knots=knots_target_total,
             selected_knots=selected_knots_arr,
             dim_names=dim_names,
             varying_dims=slice_info["varying"],
-            fixed_dims=slice_info["fixed"],
+            fixed_dims=fixed_for_points,
             save_path=os.path.join(output_dir, f"quadrature_points_{slice_id}.png")
         )
 
@@ -1116,6 +1294,15 @@ def run_phase_3(config):
             normalize=True,
         )
 
+        # Mean and moments are quadrature estimates and remain available.
+        # Quantiles and exceedance probabilities need a probability
+        # distribution, which signed Smolyak weights do not provide.
+        if _has_negative_weights(weights):
+            print(
+                f"[WARN] {int(np.sum(weights < 0))} of {weights.size} sparse-grid quadrature weights "
+                "are negative: quantiles and exceedance probabilities are written as NaN."
+            )
+
         stats_dir = os.path.join(output_dir, "statistics")
         os.makedirs(stats_dir, exist_ok=True)
 
@@ -1131,29 +1318,21 @@ def run_phase_3(config):
             if not spec["is_vector"]:
                 qty = spec["columns"][0]
                 vals = models[qty]["informed"]["f_on_unique_knots"]
-                stats = _weighted_stats(vals, weights, quantiles)
-
-                row = {
-                    "quantity": qty,
-                    "mean": stats.get("mean"),
-                    "var": stats.get("var"),
-                    "std": stats.get("std"),
-                    "skew": stats.get("skew"),
-                    "kurtosis_excess": stats.get("kurtosis_excess"),
-                }
-                for qv, qn in zip(stats.get("quantiles", []), quantiles):
-                    row[f"q{qn:.3f}"] = qv
-
-                for thr in exceedance_map.get((qty, "component"), []):
-                    row[f"P_gt_{thr}"] = np.sum(weights[vals > thr])
-
+                row = _statistics_row(
+                    {"quantity": qty}, vals, weights, quantiles,
+                    exceedance_map.get((qty, "component"), []),
+                )
                 pd.DataFrame([row]).to_csv(
                     os.path.join(stats_dir, f"stats_{qty}.csv"), index=False
                 )
             else:
                 name = spec["name"]
                 cols = spec["columns"]
-                vals = np.vstack([models[c]["informed"]["f_on_unique_knots"] for c in cols]).T
+                # Nodal values: one row per target node, one column per component.
+                component_values = []
+                for c in cols:
+                    component_values.append(models[c]["informed"]["f_on_unique_knots"])
+                vals = np.vstack(component_values).T
 
                 # per-component stats
                 rows = []
@@ -1161,25 +1340,15 @@ def run_phase_3(config):
                 comp_means = []
                 comp_stds = []
                 for j, col in enumerate(cols):
-                    stats = _weighted_stats(vals[:, j], weights, quantiles)
-                    row = {
-                        "index": j,
-                        "label": _infer_vector_label(col),
-                        "component": col,
-                        "mean": stats.get("mean"),
-                        "var": stats.get("var"),
-                        "std": stats.get("std"),
-                        "skew": stats.get("skew"),
-                        "kurtosis_excess": stats.get("kurtosis_excess"),
-                    }
-                    for qv, qn in zip(stats.get("quantiles", []), quantiles):
-                        row[f"q{qn:.3f}"] = qv
-                    for thr in exceedance_map.get((name, "component"), []):
-                        row[f"P_gt_{thr}"] = np.sum(weights[vals[:, j] > thr])
+                    row = _statistics_row(
+                        {"index": j, "label": _infer_vector_label(col), "component": col},
+                        vals[:, j], weights, quantiles,
+                        exceedance_map.get((name, "component"), []),
+                    )
                     rows.append(row)
                     comp_indices.append(j)
-                    comp_means.append(stats.get("mean"))
-                    comp_stds.append(stats.get("std"))
+                    comp_means.append(row["mean"])
+                    comp_stds.append(row["std"])
 
                 pd.DataFrame(rows).to_csv(
                     os.path.join(stats_dir, f"stats_{name}_components.csv"), index=False
@@ -1209,19 +1378,10 @@ def run_phase_3(config):
                     metrics["max"] = np.max(vals, axis=1)
 
                 for metric_name, metric_vals in metrics.items():
-                    stats = _weighted_stats(metric_vals, weights, quantiles)
-                    row = {
-                        "metric": metric_name,
-                        "mean": stats.get("mean"),
-                        "var": stats.get("var"),
-                        "std": stats.get("std"),
-                        "skew": stats.get("skew"),
-                        "kurtosis_excess": stats.get("kurtosis_excess"),
-                    }
-                    for qv, qn in zip(stats.get("quantiles", []), quantiles):
-                        row[f"q{qn:.3f}"] = qv
-                    for thr in exceedance_map.get((name, metric_name), []):
-                        row[f"P_gt_{thr}"] = np.sum(weights[metric_vals > thr])
+                    row = _statistics_row(
+                        {"metric": metric_name}, metric_vals, weights, quantiles,
+                        exceedance_map.get((name, metric_name), []),
+                    )
                     agg_rows.append(row)
 
                 pd.DataFrame(agg_rows).to_csv(

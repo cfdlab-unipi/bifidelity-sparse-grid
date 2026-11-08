@@ -50,14 +50,19 @@ def check_configuration(config):
     problem = config["problem_definition"]
     dimensions = problem["dim_names"]
     domains = problem["domains"]
-    if not dimensions or not all(isinstance(name, str) and name.strip() for name in dimensions):
+    if not dimensions:
         raise ValueError("dim_names must contain non-empty input names.")
+    for name in dimensions:
+        if not isinstance(name, str) or not name.strip():
+            raise ValueError("dim_names must contain non-empty input names.")
     if len(set(dimensions)) != len(dimensions):
         raise ValueError("Input names in dim_names must be unique.")
     if len(domains) != len(dimensions):
         raise ValueError("Provide one domain per input dimension.")
     for domain in domains:
-        if len(domain) != 2 or not all(math.isfinite(value) for value in domain) or domain[1] <= domain[0]:
+        if len(domain) != 2:
+            raise ValueError("Each domain must contain two finite bounds with max > min.")
+        if not math.isfinite(domain[0]) or not math.isfinite(domain[1]) or domain[1] <= domain[0]:
             raise ValueError("Each domain must contain two finite bounds with max > min.")
 
     quantities = _expand_qoi_specs(problem)
@@ -73,8 +78,11 @@ def check_configuration(config):
     # Simulation templates use whitespace-separated columns, so names must
     # not contain spaces or tabs. Catch this before asking for model evaluations.
     for name in dimensions + columns:
-        if not isinstance(name, str) or not name or any(character.isspace() for character in name):
+        if not isinstance(name, str) or not name:
             raise ValueError("Input and output column names must be non-empty and contain no whitespace.")
+        for character in name:
+            if character.isspace():
+                raise ValueError("Input and output column names must be non-empty and contain no whitespace.")
     if set(columns).intersection(dimensions):
         raise ValueError("Input and output column names must be different.")
     _grid_settings(problem, config["sparse_grid_settings"])

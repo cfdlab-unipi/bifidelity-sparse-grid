@@ -1,4 +1,4 @@
-# Bifidelity Sparse Grid Toolkit
+# bifidelity-sparse-grid
 
 Python tools for building sparse-grid surrogate models from simulation or
 experimental data. The method uses the discrepancy between a baseline
@@ -46,7 +46,8 @@ sparse-grid --phase 1
 
 Copy `data/my-study_phase1_to_fill.dat` to `data/my-study_phase1.dat`.
 Run the simulation at every listed point and fill all output columns.
-Keep the input coordinates and column names unchanged.
+Keep the input coordinates and column names unchanged. Coordinates are matched
+to the generated grid nodes within `1e-6` of each domain width.
 
 ### 2. Evaluate the selected refinement points
 
@@ -137,7 +138,7 @@ Function definitions and parameters are documented in [examples/README.md](examp
 | `<project>_selection.json` | Grid settings and nominal and actual evaluation counts |
 | `<project>_validation_metrics.csv` | RMSE, mean and maximum absolute error, 95th percentile absolute error, and bias |
 | `*.png` | Selection, model-slice, grid-point, and validation plots |
-| `statistics/` | Optional weighted statistics |
+| `statistics/` | Optional PDF-weighted moments; quantiles and exceedance probabilities only when all quadrature weights are nonnegative |
 | `polynomials/` | Optional polynomial coefficients |
 
 To enable validation, set `validation.validation_data_file` to a CSV or

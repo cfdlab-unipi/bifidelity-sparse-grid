@@ -18,9 +18,11 @@ python -m pip check
 ```
 
 The numerical checks cover multi-indices, polynomial/cardinal interpolation,
-a direct Lagrange reference, all Leja prefixes, quadrature, vector indicators,
-and selection ties. Workflow checks cover vector file I/O, zero/full/partial
-budgets, automatic modes, and missing selected evaluations. CLI checks run
+a direct Lagrange reference, all Leja prefixes, symmetric PDF-weighted Leja
+nodes, quadrature, statistics with signed weights, coordinate matching,
+vector indicators, and selection ties. Workflow checks cover vector file I/O,
+zero/full/partial budgets, automatic modes, missing selected evaluations,
+large-magnitude input coordinates, and coordinates written with fewer decimals. CLI checks run
 installed commands from a temporary directory, including both project templates.
 
 The numerical and workflow scripts import the checkout. The CLI script checks

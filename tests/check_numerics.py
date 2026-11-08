@@ -21,7 +21,10 @@ from bifidelity_sparse_grid.sparse_grid_toolbox import (
     knots_leja_sym_line_1d, lev2knots_doubling, lev2knots_lin,
     reduce_sparse_grid_knots, select_refinement_points, leja_nodes_and_weights_1d,
 )
-from bifidelity_sparse_grid.workflow_phases import _build_informed_model_values, _parse_pdf_specs
+from bifidelity_sparse_grid.workflow_phases import (
+    _build_informed_model_values, _parse_pdf_specs, _grid_settings,
+    _snap_points_to_grid, _weighted_stats, _exceedance_probability,
+)
 from bifidelity_sparse_grid.sparse_grid_toolbox import pdfspec_to_domain_and_rho
 from bifidelity_sparse_grid.nodes import _weighted_leja_1d
 
@@ -205,4 +208,70 @@ for count, density, size in [(4, np.ones_like, 3), (2, lambda x: np.full_like(x,
     else:
         raise AssertionError("Unsupported weighted-Leja requests must fail.")
 print("PASS: exponential alias, beta defaults, and weighted-Leja limits")
+
+# Symmetric weighted Leja must give distinct, mirrored nodes. A flat beta
+# density once repeated the midpoint, and some normal domains once produced
+# a near-duplicate first pair; both made the interpolation singular.
+symmetric_cases = [
+    ("beta", {"alpha": 0.0, "beta": 0.0}, [0.0, 1.0]),
+    ("normal", {"mu": 451.3, "sigma": 150.0}, [1.3, 901.3]),
+    ("normal", {"mu": 457.7, "sigma": 150.0}, [7.7, 907.7]),
+]
+for pdf_type, params, domain in symmetric_cases:
+    problem = {"dim_names": ["x"], "domains": [domain],
+               "pdfs": [{"type": pdf_type, "params": params, "leja_variant": "symmetric"}]}
+    _, node_rules, rule_domains, growth = _grid_settings(problem, {"base_level": 2, "target_level": 3})
+    nodes = node_rules[0](9, domain[0], domain[1])
+    width = domain[1] - domain[0]
+    assert np.min(np.diff(np.sort(nodes))) > 1e-4 * width
+    np.testing.assert_allclose(np.sort(nodes), np.sort(domain[0] + domain[1] - nodes), rtol=0, atol=1e-12 * width)
+    grid = create_sparse_grid_structure(1, 3, growth, node_rules, rule_domains)
+    knots = reduce_sparse_grid_knots(grid)
+    scaled = (knots[0] - domain[0]) / width
+    points_1d = np.linspace(domain[0], domain[1], 11)[None, :]
+    scaled_points = (points_1d[0] - domain[0]) / width
+    actual = evaluate_smolyak_from_nodal_values(points_1d, grid, knots, scaled ** 3 - scaled)
+    np.testing.assert_allclose(actual, scaled_points ** 3 - scaled_points, atol=1e-9)
+print("PASS: symmetric weighted Leja nodes are distinct and mirrored")
+
+# File coordinates of large-magnitude inputs can change in the last binary
+# digit; they must still be matched to the generated grid nodes.
+domains = [[1e5, 2e6]] * 3
+grid = create_sparse_grid_structure(3, 5, lev2knots_doubling, knots_cc_1d, domains)
+knots = reduce_sparse_grid_knots(grid)
+perturbed = np.nextafter(knots.T, np.inf)
+snapped, matched = _snap_points_to_grid(perturbed, knots, domains)
+assert np.all(matched)
+np.testing.assert_array_equal(snapped, knots.T)
+outside = knots.T[:1] + 0.01 * (2e6 - 1e5)
+assert not _snap_points_to_grid(outside, knots, domains)[1][0]
+print("PASS: file coordinates snapped to exact grid nodes")
+
+# Signed Smolyak weights do not define a distribution: no quantiles or
+# exceedance probabilities. Nonnegative one-dimensional CC weights do.
+domains = [[0.0, 1.0]] * 2
+grid = create_sparse_grid_structure(2, 3, lev2knots_doubling, knots_cc_1d, domains)
+knots = reduce_sparse_grid_knots(grid)
+weights = compute_sparse_grid_quadrature_weights(grid, knots, [np.ones_like] * 2, domains, quad_order=40)
+assert np.any(weights < 0)
+values = np.exp(knots[0] + knots[1])
+assert np.all(np.isnan(_weighted_stats(values, weights, [0.05, 0.5])["quantiles"]))
+assert np.isnan(_exceedance_probability(values, weights, 3.0))
+grid = create_sparse_grid_structure(1, 3, lev2knots_doubling, knots_cc_1d, [[0.0, 1.0]])
+knots = reduce_sparse_grid_knots(grid)
+weights = compute_sparse_grid_quadrature_weights(grid, knots, [np.ones_like], [[0.0, 1.0]], quad_order=40)
+assert np.all(weights >= 0)
+assert np.all(np.isfinite(_weighted_stats(knots[0], weights, [0.05, 0.5])["quantiles"]))
+np.testing.assert_allclose(_exceedance_probability(knots[0], weights, 0.5), np.sum(weights[knots[0] > 0.5]))
+print("PASS: quantiles and exceedance only with nonnegative weights")
+
+# Exponential and gamma densities vanish on a negative interval.
+problem = {"dim_names": ["x"], "domains": [[-2.0, -1.0]], "pdfs": ["exponential"]}
+try:
+    _parse_pdf_specs(problem)
+except ValueError:
+    pass
+else:
+    raise AssertionError("An exponential PDF on a negative interval must be rejected.")
+print("PASS: exponential/gamma interval check")
 print("All numerical checks passed.")

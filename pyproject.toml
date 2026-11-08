@@ -4,10 +4,24 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "bifidelity-sparse-grid"
-version = "0.2.0"
+version = "0.3.0"
 description = "Three-phase bifidelity sparse-grid interpolation for external simulations"
 readme = "README.md"
 license = {file = "LICENSE"}
+authors = [
+    {name = "Matteo Rosellini"},
+    {name = "Filippo Fruzza"},
+    {name = "Alessandro Mariotti"},
+    {name = "Maria Vittoria Salvetti"},
+    {name = "Lorenzo Tamellini"},
+]
+keywords = ["sparse grids", "surrogate model", "bifidelity", "uncertainty quantification", "Leja", "Clenshaw-Curtis"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Topic :: Scientific/Engineering",
+]
 requires-python = ">=3.10"
 dependencies = ["numpy", "scipy", "pandas", "matplotlib"]
 
@@ -16,6 +30,7 @@ sparse-grid = "bifidelity_sparse_grid.cli:main"
 
 [project.urls]
 Repository = "https://github.com/cfdlab-unipi/bifidelity-sparse-grid"
+Paper = "https://arxiv.org/abs/2511.20187"
 
 [tool.setuptools.packages.find]
 include = ["bifidelity_sparse_grid*"]
